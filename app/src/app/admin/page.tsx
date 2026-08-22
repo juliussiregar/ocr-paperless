@@ -3,21 +3,25 @@ import { AppShell } from "@/components/AppShell";
 import { PageHeader } from "@/components/Nav";
 import { AdminPanel } from "@/components/AdminPanel";
 import { prisma } from "@/lib/prisma";
+import { getAutoScanSettings } from "@/lib/app-settings";
 
 export default async function AdminPage() {
   const session = await requireAdmin();
 
-  const users = await prisma.user.findMany({
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      role: true,
-      createdAt: true,
-      lastSyncAt: true,
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const [users, settings] = await Promise.all([
+    prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        createdAt: true,
+        lastSyncAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    getAutoScanSettings(),
+  ]);
 
   return (
     <AppShell
@@ -37,6 +41,7 @@ export default async function AdminPage() {
             createdAt: u.createdAt.toISOString(),
             lastSyncAt: u.lastSyncAt?.toISOString() ?? null,
           }))}
+          initialSettings={settings}
         />
       </div>
     </AppShell>

@@ -70,17 +70,28 @@ function jobPhaseLabel(job: {
   }
 
   if (status === "RUNNING") {
+    if (phase === "starting") {
+      return {
+        phase: "starting",
+        title: "Menyiapkan…",
+        detail: "Memeriksa kredensial dan memulai job.",
+        etaSeconds: null,
+      };
+    }
     if (
       phase === "discovering" ||
-      (job.totalFiles === 0 && phase !== "downloading" && phase !== "submitting")
+      (job.totalFiles === 0 &&
+        phase !== "downloading" &&
+        phase !== "submitting" &&
+        phase !== "starting")
     ) {
       return {
         phase: "discovering",
         title: "Mencari PDF di cloud…",
         detail:
           job.processedFiles > 0
-            ? `${job.processedFiles} PDF ditemukan sejauh ini (belum mulai unduh).`
-            : "Sedang menelusuri folder. Ini bisa lama jika cloud besar.",
+            ? `${job.processedFiles} PDF baru ditemukan (belum mulai unduh).`
+            : "Sedang menelusuri folder (paralel). Fetch newest biasanya berhenti lebih awal.",
         etaSeconds: null,
       };
     }
@@ -254,9 +265,11 @@ export async function POST(
         { status: 400 }
       );
     }
+    const resumePhase =
+      job.totalFiles === 0 ? "discovering" : "downloading";
     const updated = await prisma.scanJob.update({
       where: { id },
-      data: { status: "RUNNING", phase: "downloading" },
+      data: { status: "RUNNING", phase: resumePhase },
     });
     await writeAudit("scan.resume", session.user.id, { jobId: id });
     return NextResponse.json({ ...updated, message: "Dilanjutkan." });

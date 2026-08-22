@@ -1,151 +1,122 @@
 # DocSearch Bappenas
 
-Portal OCR & pencarian dokumen dari Cloud Bappenas, dengan Paperless-ngx + AI chatbot.
-
-## Arsitektur (tanpa Nginx)
+Portal OCR & pencarian dokumen Cloud Bappenas (Next.js + Paperless-ngx + sync-worker).  
+**Tanpa Nginx**: browser langsung ke port app (`APP_PORT`, default 3000).
 
 ```
-Browser ──► :3000 (Next.js app)
-                ├── postgres:5432
-                ├── redis:6379
-                └── paperless:8000   (internal Docker network)
-
-sync-worker ──► postgres / redis / paperless / consume volume
+Browser ──► :3000 (app)
+              ├── postgres / redis / paperless (internal)
+sync-worker ──► WebDAV Bappenas → consume → Paperless OCR
 ```
 
-Yang dipublish ke luar: **hanya port app** (`APP_PORT`, default 3000).  
-Postgres, Redis, Paperless hanya di `127.0.0.1` (untuk tooling / setup token).
+Postgres, Redis, Paperless hanya bind `127.0.0.1` di host (tidak dipublish ke internet).
 
 ---
 
-## Deploy di server (semua via Docker)
+## Deploy di server (cara pendek)
 
-### Prasyarat
+### 1. Prasyarat
 
-- Docker + Docker Compose
-- File `.env` di root (salin dari `.env.example`)
+- Docker Engine + Docker Compose plugin
+- Port `3000` (atau `APP_PORT`) dibuka di firewall
 
-### 1. Siapkan env
+### 2. Env
 
 ```bash
 cp .env.example .env
-# Edit .env: password, secret, NEXTAUTH_URL, OPENAI_API_KEY, dll.
+nano .env   # atau vim
 ```
 
-Penting:
+Isi wajib (jangan biarkan `change-me…` / `SERVER_IP`):
 
-| Variabel | Isi |
-|----------|-----|
-| `NEXTAUTH_URL` | URL publik app, mis. `http://IP_SERVER:3000` |
-| `NEXTAUTH_SECRET` | random panjang |
-| `ENCRYPTION_KEY` | min 32 karakter (jangan diganti setelah ada data) |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | login portal (di-seed saat `app` start) |
-| `PAPERLESS_API_TOKEN` | isi setelah langkah 3 |
+| Variabel | Contoh |
+|----------|--------|
+| `COMPOSE_PROFILES` | `prod` (sudah di example) |
+| `NEXTAUTH_URL` | `http://IP_SERVER:3000` |
+| `NEXTAUTH_SECRET` | string random panjang |
+| `ENCRYPTION_KEY` | ≥ 32 karakter |
+| `POSTGRES_PASSWORD` | kuat |
+| `PAPERLESS_SECRET_KEY` / `PAPERLESS_ADMIN_*` | kuat |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | login portal |
 
-### 2. Build & jalankan semua service
+`PAPERLESS_API_TOKEN` boleh kosong dulu (diisi setelah Paperless hidup).
+
+### 3. Build & up
 
 ```bash
-# Infra saja (dev / default)
+chmod +x scripts/server-up.sh
+./scripts/server-up.sh
+```
+
+Atau setara:
+
+```bash
 docker compose up -d --build
-
-# Full termasuk Next.js app (production)
-docker compose --profile prod up -d --build
-# atau: npm run prod:up
 ```
 
-Tanpa profile `prod`, service `app` tidak dijalankan (supaya tidak bentrok dengan `npm run dev` di port 3000).
+(dengan `COMPOSE_PROFILES=prod` di `.env` agar service `app` ikut.)
 
-- App (prod): http://SERVER:3000  
-- Paperless (hanya localhost server): http://127.0.0.1:8000  
-
-### 3. Paperless API token
-
-Di server:
+### 4. Token Paperless (sekali)
 
 ```bash
-# opsi A: buka di mesin server
+# di server
 curl -I http://127.0.0.1:8000
 
-# opsi B: tunnel dari laptop
+# atau tunnel dari laptop
 ssh -L 8000:127.0.0.1:8000 user@SERVER
-# lalu buka http://127.0.0.1:8000 di browser laptop
 ```
 
-1. Login Paperless (`PAPERLESS_ADMIN_USER` / `PAPERLESS_ADMIN_PASSWORD`)
-2. Profile → **API Auth Token** → Create
-3. Paste ke `.env` → `PAPERLESS_API_TOKEN=...`
-4. Recreate app + worker:
+1. Login Paperless  
+2. Profile → **API Auth Tokens** → Create  
+3. Paste ke `.env` → `PAPERLESS_API_TOKEN=...`  
+4. Apply:
 
 ```bash
 docker compose up -d --force-recreate app sync-worker
 ```
 
-### 4. Verifikasi
+### 5. Cek
 
 ```bash
 docker compose ps
-docker compose logs -f app
 curl http://127.0.0.1:3000/api/health
 ```
 
-Login portal dengan `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+Buka `NEXTAUTH_URL`, login `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
-### Perintah berguna
-
-```bash
-docker compose up -d --build   # start / rebuild
-docker compose logs -f         # semua log
-docker compose logs -f app     # log Next.js
-docker compose down            # stop (volume tetap aman)
-docker compose down -v         # stop + hapus data (hati-hati)
-```
-
-### Update versi
+### Update kode
 
 ```bash
 git pull
-docker compose up -d --build
+./scripts/server-up.sh
+```
+
+### Perintah biasa
+
+```bash
+docker compose logs -f app
+docker compose logs -f sync-worker
+docker compose down          # stop, data volume aman
+docker compose down -v       # HAPUS data (hati-hati)
 ```
 
 ---
 
-## Development (infra Docker + Next.js lokal)
+## Development (laptop)
 
-Hot reload untuk coding sehari-hari.
-
-### Env
-
-| File | Dipakai oleh |
-|------|----------------|
-| **`.env` (root)** | Docker Compose |
-| **`app/.env.local`** | Next.js (`npm run dev`) |
-
-### Langkah
+Infra Docker, Next.js hot-reload lokal (service `app` **tidak** dijalankan):
 
 ```bash
-# 1. Infra saja (tanpa rebuild app image)
-docker compose up -d postgres redis paperless sync-worker
+# di .env lokal: hapus / kosongkan COMPOSE_PROFILES
+cp .env.example .env
+# edit password; jangan set COMPOSE_PROFILES=prod
 
-# 2. Schema + seed
-npm run db:push
-
-# 3. Next.js lokal
-cd app && npm run dev
+npm run dev:infra          # postgres redis paperless sync-worker
+npm run db:push            # schema + seed (butuh app/.env.local)
+cd app && npm run dev      # http://localhost:3000
 ```
 
-- App: http://localhost:3000  
-- Paperless: http://127.0.0.1:8000  
-- Postgres: `127.0.0.1:5434` · Redis: `127.0.0.1:6380`
-
-Atau full stack Docker (termasuk app): `docker compose up -d --build`.
-
-### Admin (dev)
-
-Admin dibuat lewat `npm run db:push` / `npm run db:seed`, atau otomatis saat container `app` start.
-
-### Paperless API Token (dev)
-
-Sama seperti deploy: isi `PAPERLESS_API_TOKEN` di root `.env` dan `PAPERLESS_TOKEN` di `app/.env.local`, lalu:
+Salin token Paperless ke root `.env` (`PAPERLESS_API_TOKEN`) dan `app/.env.local` (`PAPERLESS_TOKEN`), lalu:
 
 ```bash
 docker compose up -d --force-recreate sync-worker
@@ -153,21 +124,22 @@ docker compose up -d --force-recreate sync-worker
 
 ---
 
-## Fitur keamanan
+## Keamanan singkat
 
-- Admin via seed (bukan endpoint publik)
-- Paperless / DB / Redis hanya di localhost host
-- Rate limit chat & scan
-- OCR timeout, auto-scan, audit log
+- Jangan publish Postgres / Redis / Paperless ke `0.0.0.0`
+- Firewall: cukup buka `APP_PORT`
+- Jangan ganti `ENCRYPTION_KEY` setelah ada kredensial tersimpan
+- Auto-scan default off (aktifkan di Admin)
 
 ## Struktur
 
 ```
 ocr-paperless/
-├── .env                 # Docker (semua service)
-├── app/.env.local       # Next.js lokal (dev)
-├── app/                 # Next.js (+ Dockerfile)
-├── sync-worker/         # WebDAV → Paperless
+├── .env                 # Docker (server & infra)
+├── .env.example
+├── scripts/server-up.sh # deploy server
+├── app/                 # Next.js
+├── sync-worker/
 ├── prisma/
-└── docker-compose.yml   # postgres, redis, paperless, sync-worker, app
+└── docker-compose.yml
 ```

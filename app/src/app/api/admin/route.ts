@@ -5,25 +5,32 @@ import { encrypt } from "@/lib/crypto";
 import { writeAudit } from "@/lib/audit";
 import bcrypt from "bcryptjs";
 import { Role } from "@prisma/client";
+import {
+  getAutoScanSettings,
+  setAutoScanEnabled,
+} from "@/lib/app-settings";
 
 export async function GET() {
   const { error } = await requireAdminApi();
   if (error) return error;
 
-  const users = await prisma.user.findMany({
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      role: true,
-      createdAt: true,
-      lastSyncAt: true,
-      bappenasUrl: true,
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const [users, autoScan] = await Promise.all([
+    prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        createdAt: true,
+        lastSyncAt: true,
+        bappenasUrl: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    getAutoScanSettings(),
+  ]);
 
-  return NextResponse.json({ users });
+  return NextResponse.json({ users, settings: autoScan });
 }
 
 export async function POST(request: NextRequest) {
@@ -32,6 +39,22 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json();
   const { action } = body;
+
+  if (action === "updateSettings") {
+    if (typeof body.autoScanEnabled !== "boolean") {
+      return NextResponse.json(
+        { error: "autoScanEnabled harus boolean" },
+        { status: 400 }
+      );
+    }
+    await setAutoScanEnabled(body.autoScanEnabled);
+    await writeAudit("settings.auto_scan", session!.user.id, {
+      autoScanEnabled: body.autoScanEnabled,
+      intervalMinutes: 60,
+    });
+    const settings = await getAutoScanSettings();
+    return NextResponse.json({ settings });
+  }
 
   if (action === "createUser") {
     const {

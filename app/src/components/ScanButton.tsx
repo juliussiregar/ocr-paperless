@@ -17,6 +17,7 @@ import { showToast } from "@/components/Toast";
 const STATUS_LABEL: Record<string, string> = {
   PENDING: "Menunggu antrean...",
   RUNNING: "Memindai cloud...",
+  PAUSED: "Dijeda",
   COMPLETED: "Selesai",
   FAILED: "Gagal",
   CANCELLED: "Dihentikan",
@@ -37,9 +38,14 @@ interface ScanButtonProps {
   initialJob?: JobProgress | null;
 }
 
+function isActiveStatus(status: string | undefined): boolean {
+  return (
+    status === "RUNNING" || status === "PENDING" || status === "PAUSED"
+  );
+}
+
 export function ScanButton({ initialJob }: ScanButtonProps) {
-  const initialActive =
-    initialJob?.status === "RUNNING" || initialJob?.status === "PENDING";
+  const initialActive = isActiveStatus(initialJob?.status);
 
   const [loading, setLoading] = useState(!!initialActive);
   const [cancelling, setCancelling] = useState(false);
@@ -57,33 +63,40 @@ export function ScanButton({ initialJob }: ScanButtonProps) {
   }, []);
 
   async function pollJob(id: string) {
-    const res = await fetch(`/api/scan/${id}`);
-    if (!res.ok) return;
-    const job = await res.json();
-    setProgress(job);
-    setJobId(id);
-
-    if (job.status === "RUNNING" || job.status === "PENDING") {
-      setLoading(true);
-      setTimeout(() => pollJob(id), 2000);
-    } else {
-      setLoading(false);
-      setCancelling(false);
-      router.refresh();
-      if (job.status === "COMPLETED") {
-        showToast(
-          `${job.newFiles} dokumen baru siap dicari · ${job.skippedFiles} dilewati`,
-          "success"
-        );
-      } else if (job.status === "FAILED") {
-        showToast(
-          job.errorMessage ??
-            "Scan gagal. Coba lagi atau periksa kredensial cloud",
-          "error"
-        );
-      } else if (job.status === "CANCELLED") {
-        showToast("Scan dihentikan", "success");
+    try {
+      const res = await fetch(`/api/scan/${id}`);
+      if (!res.ok) {
+        setTimeout(() => pollJob(id), 2500);
+        return;
       }
+      const job = await res.json();
+      setProgress(job);
+      setJobId(id);
+
+      if (isActiveStatus(job.status)) {
+        setLoading(true);
+        setTimeout(() => pollJob(id), job.status === "PAUSED" ? 2500 : 2000);
+      } else {
+        setLoading(false);
+        setCancelling(false);
+        router.refresh();
+        if (job.status === "COMPLETED") {
+          showToast(
+            `${job.newFiles} dokumen baru siap dicari · ${job.skippedFiles} dilewati`,
+            "success"
+          );
+        } else if (job.status === "FAILED") {
+          showToast(
+            job.errorMessage ??
+              "Scan gagal. Coba lagi atau periksa kredensial cloud",
+            "error"
+          );
+        } else if (job.status === "CANCELLED") {
+          showToast("Scan dihentikan", "success");
+        }
+      }
+    } catch {
+      setTimeout(() => pollJob(id), 2500);
     }
   }
 
@@ -132,9 +145,7 @@ export function ScanButton({ initialJob }: ScanButtonProps) {
   }
 
   const isActive =
-    loading ||
-    progress?.status === "RUNNING" ||
-    progress?.status === "PENDING";
+    loading || isActiveStatus(progress?.status);
 
   const isDiscovering =
     isActive && (progress?.totalFiles ?? 0) === 0;

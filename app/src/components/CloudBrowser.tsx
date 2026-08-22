@@ -633,59 +633,70 @@ function CloudBrowserInner() {
     if (!ingestJobId) return;
     let cancelled = false;
     async function poll() {
-      const res = await fetch(`/api/scan/${ingestJobId}`);
-      if (!res.ok || cancelled) return;
-      const job = await res.json();
-      setIngestProgress({
-        status: job.status,
-        phase: job.phase ?? "unknown",
-        phaseTitle: job.phaseTitle ?? job.status,
-        phaseDetail: job.phaseDetail ?? "",
-        progressPercent: job.progressPercent ?? null,
-        processedFiles: job.processedFiles,
-        totalFiles: job.totalFiles,
-        failedFiles: job.failedFiles,
-        newFiles: job.newFiles,
-        skippedFiles: job.skippedFiles,
-        currentFile: job.currentFile,
-        ocrPendingCount: job.ocrPendingCount ?? 0,
-        errorMessage: job.errorMessage,
-        etaSeconds: job.etaSeconds ?? null,
-      });
-      await load(path, true);
-      if (
-        job.status === "RUNNING" ||
-        job.status === "PENDING" ||
-        job.status === "PAUSED"
-      ) {
-        setIngesting(true);
-        setTimeout(poll, job.status === "PAUSED" ? 2500 : 1500);
-      } else {
-        setIngesting(false);
-        setCancelling(false);
-        await loadRecent();
-        await loadQueue();
-        if ((job.ocrPendingCount ?? 0) > 0) {
-          setWatchingOcr(true);
+      try {
+        const res = await fetch(`/api/scan/${ingestJobId}`);
+        if (!res.ok || cancelled) {
+          if (!cancelled && ingestJobId) {
+            setTimeout(poll, 2500);
+          }
+          return;
+        }
+        const job = await res.json();
+        setIngestProgress({
+          status: job.status,
+          phase: job.phase ?? "unknown",
+          phaseTitle: job.phaseTitle ?? job.status,
+          phaseDetail: job.phaseDetail ?? "",
+          progressPercent: job.progressPercent ?? null,
+          processedFiles: job.processedFiles,
+          totalFiles: job.totalFiles,
+          failedFiles: job.failedFiles,
+          newFiles: job.newFiles,
+          skippedFiles: job.skippedFiles,
+          currentFile: job.currentFile,
+          ocrPendingCount: job.ocrPendingCount ?? 0,
+          errorMessage: job.errorMessage,
+          etaSeconds: job.etaSeconds ?? null,
+        });
+        await load(path, true);
+        if (
+          job.status === "RUNNING" ||
+          job.status === "PENDING" ||
+          job.status === "PAUSED"
+        ) {
+          setIngesting(true);
+          setTimeout(poll, job.status === "PAUSED" ? 2500 : 1500);
         } else {
-          setIngestProgress(null);
+          setIngesting(false);
+          setCancelling(false);
+          await loadRecent();
+          await loadQueue();
+          if ((job.ocrPendingCount ?? 0) > 0 && job.status === "COMPLETED") {
+            setWatchingOcr(true);
+          } else {
+            setIngestProgress(null);
+          }
+          if (job.status === "COMPLETED") {
+            const msg =
+              job.totalFiles === 0 && job.errorMessage
+                ? job.errorMessage
+                : `Selesai dikirim: ${job.newFiles} baru, ${job.failedFiles} gagal` +
+                  ((job.ocrPendingCount ?? 0) > 0
+                    ? ` · OCR masih jalan untuk ${job.ocrPendingCount} file`
+                    : "");
+            showToast(msg, "success");
+          } else if (job.status === "CANCELLED") {
+            showToast("Pengambilan dihentikan", "success");
+            setIngestProgress(null);
+            setIngestJobId(null);
+          } else if (job.status === "FAILED") {
+            showToast(job.errorMessage ?? "Pengambilan gagal", "error");
+            setIngestProgress(null);
+            setIngestJobId(null);
+          }
         }
-        if (job.status === "COMPLETED") {
-          const msg =
-            job.totalFiles === 0 && job.errorMessage
-              ? job.errorMessage
-              : `Selesai dikirim: ${job.newFiles} baru, ${job.failedFiles} gagal` +
-                ((job.ocrPendingCount ?? 0) > 0
-                  ? ` · OCR masih jalan untuk ${job.ocrPendingCount} file`
-                  : "");
-          showToast(msg, "success");
-        } else if (job.status === "CANCELLED") {
-          showToast("Pengambilan dihentikan", "success");
-          setIngestProgress(null);
-        } else if (job.status === "FAILED") {
-          showToast(job.errorMessage ?? "Pengambilan gagal", "error");
-          setIngestProgress(null);
-        }
+      } catch {
+        if (!cancelled) setTimeout(poll, 2500);
       }
     }
     poll();
@@ -1044,31 +1055,36 @@ function CloudBrowserInner() {
   }
 
   async function handleStop() {
-    if (!ingestJobId) return;
+    if (!ingestJobId || cancelling) return;
     setCancelling(true);
-    const res = await fetch(`/api/scan/${ingestJobId}`, { method: "DELETE" });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setCancelling(false);
-      showToast(
-        (data as { error?: string }).error ?? "Gagal menghentikan",
-        "error"
+    try {
+      const res = await fetch(`/api/scan/${ingestJobId}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setCancelling(false);
+        showToast(
+          (data as { error?: string }).error ?? "Gagal menghentikan",
+          "error"
+        );
+        return;
+      }
+      setIngestProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "CANCELLED",
+              phase: "done",
+              phaseTitle: "Menghentikan…",
+              phaseDetail:
+                "Menunggu worker menghentikan unduhan yang sedang berjalan.",
+            }
+          : prev
       );
-      return;
+      // Keep ingestJobId + polling; final toast when poll sees CANCELLED.
+    } catch {
+      setCancelling(false);
+      showToast("Gagal menghentikan", "error");
     }
-    setIngesting(false);
-    setWatchingOcr(false);
-    setCancelling(false);
-    setIngestProgress(null);
-    const abandoned = (data as { abandoned?: number }).abandoned ?? 0;
-    showToast(
-      abandoned > 0
-        ? `Dihentikan. ${abandoned} file antre dibersihkan (lihat Failed untuk retry).`
-        : ((data as { message?: string }).message ?? "Pengambilan dihentikan"),
-      "success"
-    );
-    await load(path, true);
-    void loadQueue();
   }
 
   function openSearchResult(result: SearchResult) {

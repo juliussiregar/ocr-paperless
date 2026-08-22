@@ -98,6 +98,8 @@ services:
       SYNC_POLL_INTERVAL_MS: ${SYNC_POLL_INTERVAL_MS:-900000}
       AUTO_SCAN_ENABLED: ${AUTO_SCAN_ENABLED:-false}
       SCAN_MAX_FILES: ${SCAN_MAX_FILES:-50}
+      WEBDAV_DISCOVERY_CONCURRENCY: ${WEBDAV_DISCOVERY_CONCURRENCY:-16}
+      WEBDAV_DOWNLOAD_CONCURRENCY: ${WEBDAV_DOWNLOAD_CONCURRENCY:-2}
       OCR_PENDING_TIMEOUT_MINUTES: ${OCR_PENDING_TIMEOUT_MINUTES:-180}
       STUCK_SYNC_MINUTES: ${STUCK_SYNC_MINUTES:-60}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
@@ -105,8 +107,8 @@ services:
     networks:
       - internal
 
-  # Hanya ikut saat: docker compose --profile prod up -d --build
-  # Dev: biarkan Next.js lokal (npm run dev), jangan start service ini.
+  # Sertakan lewat COMPOSE_PROFILES=prod di .env (wajib di server).
+  # Lokal + npm run dev: biarkan COMPOSE_PROFILES kosong agar port 3000 bebas.
   app:
     profiles: ["prod"]
     build:
@@ -120,8 +122,10 @@ services:
         condition: service_healthy
       paperless:
         condition: service_started
+      sync-worker:
+        condition: service_started
     ports:
-      # Public entry (no Nginx): http://SERVER_IP:3000
+      # Tanpa Nginx: buka http://SERVER_IP:APP_PORT
       - "${APP_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/app
@@ -143,6 +147,7 @@ services:
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       SCAN_MAX_FILES: ${SCAN_MAX_FILES:-50}
       OCR_PENDING_TIMEOUT_MINUTES: ${OCR_PENDING_TIMEOUT_MINUTES:-180}
+      AUTO_SCAN_ENABLED: ${AUTO_SCAN_ENABLED:-false}
       TZ: ${TZ:-Asia/Jakarta}
     healthcheck:
       test:
@@ -155,7 +160,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 90s
     networks:
       - internal
 
