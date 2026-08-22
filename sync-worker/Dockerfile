@@ -6,9 +6,10 @@ COPY sync-worker/package.json sync-worker/package-lock.json ./sync-worker/
 WORKDIR /app/sync-worker
 RUN npm ci
 
-COPY prisma /app/prisma/
+COPY prisma /app/prisma
 COPY sync-worker/ ./
-RUN npx prisma generate --schema=/app/prisma/schema.prisma && npm run build
+RUN npx prisma generate --schema=/app/prisma/schema.docker.prisma \
+  && npm run build
 
 FROM node:22-alpine
 

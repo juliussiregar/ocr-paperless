@@ -176,20 +176,25 @@ export function FolderTreeSidebar({
             `/api/cloud/tree?path=${encodeURIComponent(target)}`
           );
           const data = await res.json();
-          const rawEntries =
-            (data.entries as
-              | {
-                  path: string;
-                  name: string;
-                  type?: string;
-                  isPdf?: boolean;
-                  paperlessDocumentId?: number | null;
-                }[]
-              | undefined) ??
+          type RawEntry = {
+            path: string;
+            name: string;
+            type?: string;
+            isPdf?: boolean;
+            paperlessDocumentId?: number | null;
+          };
+
+          const rawEntries: RawEntry[] =
+            (data.entries as RawEntry[] | undefined) ??
             (
               (data.folders as { path: string; name: string }[] | undefined) ??
               []
-            ).map((f) => ({ ...f, type: "directory" as const }));
+            ).map((f) => ({
+              ...f,
+              type: "directory",
+              isPdf: false,
+              paperlessDocumentId: null,
+            }));
 
           const children: TreeNode[] = rawEntries.map((e) => {
             const kind: NodeKind = e.type === "file" ? "file" : "directory";
