@@ -54,17 +54,32 @@ fi
 
 case "$NEXTAUTH_URL" in
   http://localhost*|http://127.0.0.1*)
-    echo "WARN: NEXTAUTH_URL=$NEXTAUTH_URL - di server publik sebaiknya http://IP_ATAU_DOMAIN:3000"
+    echo "WARN: NEXTAUTH_URL=$NEXTAUTH_URL - di server publik sebaiknya http://IP_ATAU_DOMAIN:${APP_PORT:-3002}"
     ;;
 esac
+
+# Port app bentrok dengan service lain di host?
+PORT="${APP_PORT:-3002}"
+if command -v ss >/dev/null 2>&1; then
+  if ss -lnt | awk '{print $4}' | grep -E ":${PORT}\$" >/dev/null 2>&1; then
+    echo "WARN: port ${PORT} sudah listen di host. Ganti APP_PORT di .env (arteloka pakai 3001 → pakai 3002)."
+  fi
+fi
 
 mkdir -p paperless/consume paperless/export
 touch paperless/consume/.gitkeep paperless/export/.gitkeep
 
-info "Build & start (docker compose up -d --build)"
+# VPS kecil tanpa swap: saran (opsional, tidak dijalankan otomatis)
+if [[ "$(free -b | awk '/Mem:/{print $2}')" -lt 5000000000 ]]; then
+  if [[ "$(free -b | awk '/Swap:/{print $2}')" -eq 0 ]]; then
+    echo "WARN: RAM <5GB dan Swap=0. OCR Paperless bisa OOM. Disarankan buat swap 2G:"
+    echo "  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
+  fi
+fi
+
+info "Build & start (docker compose up -d --build) project=docsearch"
 docker compose up -d --build
 
-PORT="${APP_PORT:-3000}"
 info "Menunggu app sehat di :$PORT ..."
 ok=0
 for _ in $(seq 1 60); do
@@ -88,14 +103,15 @@ fi
 echo
 echo "Portal:  ${NEXTAUTH_URL}"
 echo "Login:   ${ADMIN_EMAIL:-admin} / (ADMIN_PASSWORD di .env)"
-echo "Paperless (localhost server saja): http://127.0.0.1:8000"
+echo "Paperless (localhost saja): http://127.0.0.1:${PAPERLESS_HOST_PORT:-8000}"
+echo "Host ports: app ${PORT} | pg 127.0.0.1:${POSTGRES_HOST_PORT:-5434} | redis 127.0.0.1:${REDIS_HOST_PORT:-6380}"
 echo
 
 if [[ -z "${PAPERLESS_API_TOKEN:-}" ]]; then
   cat <<EOF
 Langkah sekali saja - Paperless API token:
-  1) Di server: buka http://127.0.0.1:8000
-     atau dari laptop: ssh -L 8000:127.0.0.1:8000 user@SERVER
+  1) Di server: curl -I http://127.0.0.1:${PAPERLESS_HOST_PORT:-8000}
+     atau dari laptop: ssh -L 8000:127.0.0.1:${PAPERLESS_HOST_PORT:-8000} user@SERVER
   2) Login Paperless (PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD)
   3) Profile → API Auth Tokens → Create
   4) Paste ke .env: PAPERLESS_API_TOKEN=...
@@ -107,3 +123,4 @@ else
 fi
 
 info "Selesai. Log: docker compose logs -f"
+info "Stop DocSearch saja (arteloka tetap jalan): docker compose down"

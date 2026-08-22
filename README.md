@@ -15,31 +15,40 @@ Postgres, Redis, Paperless hanya bind `127.0.0.1` di host (tidak dipublish ke in
 
 ## Deploy di server (cara pendek)
 
+Contoh VPS **arteloka** (sudah ada app di `:3001`, Postgres di `:5432`):
+
+| Service | Port host |
+|---------|-----------|
+| Arteloka app | `3001` (biarkan) |
+| DocSearch portal | **`3002`** |
+| DocSearch Postgres | `127.0.0.1:5434` (bukan 5432) |
+| DocSearch Redis | `127.0.0.1:6380` |
+| Paperless admin | `127.0.0.1:8000` |
+
+Project Compose bernama `docsearch` (container/volume terpisah dari `arteloka-*`).  
+RAM ~4GB: Paperless dibatasi ~1.5GB, worker OCR = 1, batch scan default 20. **Disarankan swap 2G.**
+
 ### 1. Prasyarat
 
 - Docker Engine + Docker Compose plugin
-- Port `3000` (atau `APP_PORT`) dibuka di firewall
+- Firewall buka **`APP_PORT`** (default 3002)
 
 ### 2. Env
 
 ```bash
 cp .env.example .env
-nano .env   # atau vim
+nano .env
 ```
 
 Isi wajib (jangan biarkan `change-me…` / `SERVER_IP`):
 
-| Variabel | Contoh |
-|----------|--------|
-| `COMPOSE_PROFILES` | `prod` (sudah di example) |
-| `NEXTAUTH_URL` | `http://IP_SERVER:3000` |
-| `NEXTAUTH_SECRET` | string random panjang |
-| `ENCRYPTION_KEY` | ≥ 32 karakter |
-| `POSTGRES_PASSWORD` | kuat |
-| `PAPERLESS_SECRET_KEY` / `PAPERLESS_ADMIN_*` | kuat |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | login portal |
-
-`PAPERLESS_API_TOKEN` boleh kosong dulu (diisi setelah Paperless hidup).
+| Variabel | Contoh arteloka |
+|----------|-----------------|
+| `COMPOSE_PROFILES` | `prod` |
+| `APP_PORT` | `3002` |
+| `NEXTAUTH_URL` | `http://IP_SERVER:3002` |
+| `NEXTAUTH_SECRET` / `ENCRYPTION_KEY` | random kuat |
+| Password DB / Paperless / Admin | kuat |
 
 ### 3. Build & up
 
@@ -48,30 +57,11 @@ chmod +x scripts/server-up.sh
 ./scripts/server-up.sh
 ```
 
-Atau setara:
-
-```bash
-docker compose up -d --build
-```
-
-(dengan `COMPOSE_PROFILES=prod` di `.env` agar service `app` ikut.)
-
 ### 4. Token Paperless (sekali)
 
 ```bash
-# di server
-curl -I http://127.0.0.1:8000
-
-# atau tunnel dari laptop
-ssh -L 8000:127.0.0.1:8000 user@SERVER
-```
-
-1. Login Paperless  
-2. Profile → **API Auth Tokens** → Create  
-3. Paste ke `.env` → `PAPERLESS_API_TOKEN=...`  
-4. Apply:
-
-```bash
+ssh -L 8000:127.0.0.1:8000 arteloka@SERVER
+# browser: http://127.0.0.1:8000 → API token → .env PAPERLESS_API_TOKEN=
 docker compose up -d --force-recreate app sync-worker
 ```
 
@@ -79,25 +69,21 @@ docker compose up -d --force-recreate app sync-worker
 
 ```bash
 docker compose ps
-curl http://127.0.0.1:3000/api/health
+curl http://127.0.0.1:3002/api/health
+# arteloka tetap: docker ps | grep arteloka
 ```
 
-Buka `NEXTAUTH_URL`, login `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
-
-### Update kode
+### Update
 
 ```bash
 git pull
 ./scripts/server-up.sh
 ```
 
-### Perintah biasa
+### Stop DocSearch saja (arteloka tetap)
 
 ```bash
-docker compose logs -f app
-docker compose logs -f sync-worker
-docker compose down          # stop, data volume aman
-docker compose down -v       # HAPUS data (hati-hati)
+docker compose down
 ```
 
 ---
