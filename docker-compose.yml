@@ -1,0 +1,171 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: paperless
+    ports:
+      # Host-only for local tooling; not needed by other containers
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - paperless_data:/usr/src/paperless/data
+      - paperless_media:/usr/src/paperless/media
+      - ./paperless/consume:/usr/src/paperless/consume
+      - ./paperless/export:/usr/src/paperless/export
+    environment:
+      PAPERLESS_REDIS: redis://redis:6379
+      PAPERLESS_DBHOST: postgres
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: ${POSTGRES_USER}
+      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY:?Set PAPERLESS_SECRET_KEY in .env}
+      PAPERLESS_TIME_ZONE: ${TZ:-Asia/Jakarta}
+      # eng always in image; ind installed via PAPERLESS_OCR_LANGUAGES
+      PAPERLESS_OCR_LANGUAGE: eng+ind
+      PAPERLESS_OCR_LANGUAGES: ind
+      PAPERLESS_OCR_MODE: auto
+      PAPERLESS_CONSUMER_POLLING: 30
+      PAPERLESS_CONSUMER_RECURSIVE: "true"
+      PAPERLESS_CONSUMER_SUBDIRS_AS_TAGS: "true"
+      # URL for Paperless admin UI (SSH tunnel / localhost)
+      PAPERLESS_URL: ${PAPERLESS_URL:-http://127.0.0.1:8000}
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER:?Set PAPERLESS_ADMIN_USER}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD:?Set PAPERLESS_ADMIN_PASSWORD}
+      PAPERLESS_ADMIN_MAIL: ${PAPERLESS_ADMIN_MAIL:-admin@localhost}
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - internal
+
+  sync-worker:
+    build:
+      context: .
+      dockerfile: sync-worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      paperless:
+        condition: service_started
+    volumes:
+      - ./paperless/consume:/consume
+      - sync_temp:/tmp/sync
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/app
+      REDIS_URL: redis://redis:6379
+      PAPERLESS_URL: http://paperless:8000
+      PAPERLESS_TOKEN: ${PAPERLESS_API_TOKEN:-}
+      CONSUME_DIR: /consume
+      SYNC_TEMP_DIR: /tmp/sync
+      SYNC_POLL_INTERVAL_MS: ${SYNC_POLL_INTERVAL_MS:-900000}
+      AUTO_SCAN_ENABLED: ${AUTO_SCAN_ENABLED:-false}
+      SCAN_MAX_FILES: ${SCAN_MAX_FILES:-50}
+      OCR_PENDING_TIMEOUT_MINUTES: ${OCR_PENDING_TIMEOUT_MINUTES:-180}
+      STUCK_SYNC_MINUTES: ${STUCK_SYNC_MINUTES:-60}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      TZ: ${TZ:-Asia/Jakarta}
+    networks:
+      - internal
+
+  # Hanya ikut saat: docker compose --profile prod up -d --build
+  # Dev: biarkan Next.js lokal (npm run dev), jangan start service ini.
+  app:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      paperless:
+        condition: service_started
+    ports:
+      # Public entry (no Nginx): http://SERVER_IP:3000
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/app
+      REDIS_URL: redis://redis:6379
+      PAPERLESS_URL: http://paperless:8000
+      PAPERLESS_TOKEN: ${PAPERLESS_API_TOKEN:-}
+      PAPERLESS_API_TOKEN: ${PAPERLESS_API_TOKEN:-}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL in .env}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+      BAPPENAS_URL: ${BAPPENAS_URL:-https://cloud.bappenas.go.id}
+      BAPPENAS_USERNAME: ${BAPPENAS_USERNAME:-}
+      BAPPENAS_PASSWORD: ${BAPPENAS_PASSWORD:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      SCAN_MAX_FILES: ${SCAN_MAX_FILES:-50}
+      OCR_PENDING_TIMEOUT_MINUTES: ${OCR_PENDING_TIMEOUT_MINUTES:-180}
+      TZ: ${TZ:-Asia/Jakarta}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  paperless_data:
+  paperless_media:
+  sync_temp:

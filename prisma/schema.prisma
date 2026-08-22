@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// App and sync-worker each have their own node_modules/@prisma/client;
+// generate into those trees so Next/worker never load a stale root client.
+generator client_app {
+  provider = "prisma-client-js"
+  output   = "../app/node_modules/.prisma/client"
+}
+
+generator client_worker {
+  provider = "prisma-client-js"
+  output   = "../sync-worker/node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum SyncStatus {
+  DISCOVERED
+  DOWNLOADING
+  QUEUED
+  OCR_PENDING
+  OCR_DONE
+  SKIPPED
+  FAILED
+}
+
+enum ScanJobStatus {
+  PENDING
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id                         String    @id @default(cuid())
+  email                      String    @unique
+  name                       String
+  passwordHash               String    @map("password_hash")
+  role                       Role      @default(USER)
+  bappenasUrl                String    @default("https://cloud.bappenas.go.id") @map("bappenas_url")
+  encryptedBappenasUsername  String    @map("encrypted_bappenas_username")
+  encryptedBappenasPassword  String    @map("encrypted_bappenas_password")
+  lastSyncAt                 DateTime? @map("last_sync_at")
+  lastDiscoveryAt            DateTime? @map("last_discovery_at")
+  createdAt                  DateTime  @default(now()) @map("created_at")
+  updatedAt                  DateTime  @updatedAt @map("updated_at")
+
+  scanJobs  ScanJob[]
+  syncFiles SyncFile[]
+  audits    AuditLog[]
+  chats     ChatConversation[]
+  favorites CloudFavorite[]
+
+  @@map("users")
+}
+
+model CloudFavorite {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  path         String
+  lastOpenedAt DateTime @default(now()) @map("last_opened_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, path])
+  @@index([userId])
+  @@map("cloud_favorites")
+}
+
+model SyncFile {
+  id                  String     @id @default(cuid())
+  userId              String     @map("user_id")
+  user                User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  remotePath          String     @map("remote_path")
+  remoteFileId        String?    @map("remote_file_id")
+  fileName            String     @map("file_name")
+  etag                String?
+  lastModified        DateTime?  @map("last_modified")
+  fileSize            BigInt?    @map("file_size")
+  contentHash         String?    @map("content_hash")
+  mimeType            String?    @map("mime_type")
+  syncStatus          SyncStatus @default(DISCOVERED) @map("sync_status")
+  paperlessDocumentId Int?       @map("paperless_document_id")
+  errorMessage        String?    @map("error_message")
+  lastSyncedAt        DateTime?  @map("last_synced_at")
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
+
+  @@unique([userId, remotePath])
+  @@index([userId])
+  @@index([contentHash])
+  @@index([syncStatus])
+  @@index([etag])
+  @@index([paperlessDocumentId])
+  @@map("sync_files")
+}
+
+model ScanJob {
+  id             String        @id @default(cuid())
+  triggeredById  String?       @map("triggered_by_id")
+  triggeredBy    User?         @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
+  status         ScanJobStatus @default(PENDING)
+  /// "full_scan" | "ingest_selected"
+  jobType        String        @default("full_scan") @map("job_type")
+  /// JSON string[] of remote paths when jobType=ingest_selected
+  selectedPaths  String?       @map("selected_paths")
+  totalFiles     Int           @default(0) @map("total_files")
+  processedFiles Int           @default(0) @map("processed_files")
+  skippedFiles   Int           @default(0) @map("skipped_files")
+  failedFiles    Int           @default(0) @map("failed_files")
+  newFiles       Int           @default(0) @map("new_files")
+  /// pending | discovering | downloading | submitting | done
+  phase          String?       @map("phase")
+  currentFile    String?       @map("current_file")
+  errorMessage   String?       @map("error_message")
+  startedAt      DateTime?     @map("started_at")
+  completedAt    DateTime?     @map("completed_at")
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  @@index([status])
+  @@index([triggeredById])
+  @@map("scan_jobs")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  meta      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+enum ChatRole {
+  USER
+  ASSISTANT
+}
+
+model ChatConversation {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String   @default("New chat")
+  /// JSON: { mode: "all" } | { mode: "docs", docIds: number[] } | { mode: "folder", pathPrefix: string }
+  scope     String   @default("{\"mode\":\"all\"}")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  messages ChatMessage[]
+
+  @@index([userId, updatedAt])
+  @@map("chat_conversations")
+}
+
+model ChatMessage {
+  id             String           @id @default(cuid())
+  conversationId String           @map("conversation_id")
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           ChatRole
+  content        String
+  /// JSON ChatCitation[]
+  citations      String?
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  @@index([conversationId, createdAt])
+  @@map("chat_messages")
+}

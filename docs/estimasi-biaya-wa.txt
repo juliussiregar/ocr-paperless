@@ -1,0 +1,85 @@
+Halo Bapak/Ibu 👋
+
+Berikut estimasi biaya operasional *Portal OCR & Pencarian Dokumen Bappenas*:
+
+━━━━━━━━━━━━━━━━━━━━
+*ASUMSI PENGGUNAAN*
+━━━━━━━━━━━━━━━━━━━━
+
+👥 6–10 user aktif, dipakai hampir setiap hari
+📄 ±500–2.000 dokumen per user
+📊 ±3.000–8.000 dokumen unik (setelah deduplikasi)
+📁 Rata-rata *±4 MB per dokumen* (PDF scan & digital)
+💾 Total storage terpakai ±15–55 GB (dari kapasitas 100 GB)
+🤖 ±10–20 pertanyaan AI per user per hari
+→ ±1.800–4.000 query AI / bulan
+
+━━━━━━━━━━━━━━━━━━━━
+*BIAYA BULANAN*
+━━━━━━━━━━━━━━━━━━━━
+
+*1. Server (VPS 8GB RAM, 100GB SSD)*
+*Rp 600.000 / bulan*
+→ App, OCR, database, & penyimpanan dokumen
+→ Cukup untuk 6–10 user + OCR batch
+
+*2. AI Chatbot (OpenAI GPT-4o-mini)*
+*Rp 400.000 – 600.000 / bulan*
+→ Pencarian isi dokumen via chat + sumber rujukan
+→ Sudah termasuk buffer penggunaan harian
+
+━━━━━━━━━━━━━━━━━━━━
+*TOTAL OPERASIONAL*
+*Rp 1.200.000 / bulan*
+━━━━━━━━━━━━━━━━━━━━
+
+Setara ~$75 USD/bulan (kurs Rp 16.000)
+
+━━━━━━━━━━━━━━━━━━━━
+*BIAYA TAHUNAN*
+━━━━━━━━━━━━━━━━━━━━
+
+*Domain .go.id : Rp 250.000 / tahun*
+(Bandwidth sudah termasuk paket VPS — tidak ada biaya tambahan)
+
+━━━━━━━━━━━━━━━━━━━━
+*BIAYA SETUP AWAL (SEKALI)*
+━━━━━━━━━━━━━━━━━━━━
+
+• Sync & OCR pertama (3.000–8.000 dokumen) : *Rp 0* lisensi, proses 3–7 hari kerja
+• Setup server & integrasi Cloud Bappenas : *Rp 5.000.000 – 10.000.000*
+• Index AI awal seluruh arsip : *Rp 50.000 – 150.000*
+
+━━━━━━━━━━━━━━━━━━━━
+*ESTIMASI TAHUN PERTAMA*
+━━━━━━━━━━━━━━━━━━━━
+
+Operasional  : Rp 1.200.000 × 12 = *Rp 14.400.000*
+Domain       : *Rp 250.000*
+Setup awal   : *Rp 5.000.000 – 10.000.000*
+
+*Total: ± Rp 19.650.000 – 24.650.000*
+
+━━━━━━━━━━━━━━━━━━━━
+*FITUR*
+━━━━━━━━━━━━━━━━━━━━
+
+✅ Sync & scan dari Cloud Bappenas (manual + monitoring)
+✅ OCR isi PDF (Indonesia + English)
+✅ Pencarian kata kunci & isi dokumen
+✅ AI chatbot — tanya dokumen pakai bahasa natural
+✅ Tidak scan ulang file yang sudah ada / tidak berubah
+✅ User management (admin + user organisasi)
+✅ Login langsung tanpa tunggu proses scan
+
+━━━━━━━━━━━━━━━━━━━━
+*CATATAN*
+━━━━━━━━━━━━━━━━━━━━
+
+• Data disimpan di server sendiri (on-premise/VPS)
+• OCR Tesseract *gratis* — tidak ada biaya per halaman
+• Jika rata-rata dokumen >8 MB atau arsip >10.000 file, storage perlu di-upgrade
+
+Kalau Bapak/Ibu setuju, kami siap mulai deploy & uji koneksi ke cloud.bappenas.go.id 🙏
+
+Terima kasih!
