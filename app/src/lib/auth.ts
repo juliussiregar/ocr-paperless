@@ -8,6 +8,8 @@ const SESSION_MAX_AGE_REMEMBER = 30 * 24 * 60 * 60;
 const SESSION_MAX_AGE_SHORT = 8 * 60 * 60;
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  // Allow access via public IP/host (e.g. http://SERVER_IP:3002)
+  trustHost: true,
   providers: [
     Credentials({
       credentials: {
