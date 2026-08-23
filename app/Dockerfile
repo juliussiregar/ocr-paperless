@@ -14,7 +14,6 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS=--max-old-space-size=768
 RUN npm run build
 # Fresh prisma CLI install so all transitive deps (dotenv, defu, c12, ...) are present.
-# Hoisted copy from Next standalone often misses optional peer deps and crash-loops migrate.
 RUN mkdir -p /prisma-bundle \
   && cd /prisma-bundle \
   && npm init -y >/dev/null \
@@ -35,19 +34,21 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 nextjs
 
+# Next standalone from /app/app usually emits server.js at standalone root
 COPY --from=builder /app/app/.next/standalone ./
-COPY --from=builder /app/app/.next/static ./app/.next/static
-COPY --from=builder /app/app/public ./app/public
+COPY --from=builder /app/app/.next/static ./.next/static
+COPY --from=builder /app/app/public ./public
 
-COPY --from=builder /prisma-bundle/node_modules/ ./app/node_modules/
+# Merge prisma CLI + client into node_modules (alongside standalone deps)
+COPY --from=builder /prisma-bundle/node_modules/ ./node_modules/
 COPY --from=builder /app/prisma /app/prisma
 
-COPY app/docker-entrypoint.sh /app/app/docker-entrypoint.sh
-RUN chmod +x /app/app/docker-entrypoint.sh \
+COPY app/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh \
   && chown -R nextjs:nodejs /app
 
 USER nextjs
-WORKDIR /app/app
+WORKDIR /app
 
 EXPOSE 3000
 ENV PORT=3000

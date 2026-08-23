@@ -2,15 +2,13 @@
 set -e
 
 SCHEMA=/app/prisma/schema.prisma
-PRISMA="node /app/app/node_modules/prisma/build/index.js"
+PRISMA="node /app/node_modules/prisma/build/index.js"
 
 echo "Applying database migrations..."
 if ! $PRISMA migrate deploy --schema="$SCHEMA"; then
   echo "migrate deploy failed; continuing with db push..."
 fi
 
-# Safety net: keep DB aligned with prisma/schema.prisma on every boot.
-# Do not crash-loop the portal if CLI deps/schema push fail; tables may already exist.
 echo "Syncing schema (prisma db push)..."
 if ! $PRISMA db push --schema="$SCHEMA" --skip-generate; then
   echo "WARN: prisma db push failed; continuing to start Next.js"
@@ -18,10 +16,22 @@ fi
 
 if [ -n "${ADMIN_EMAIL:-}" ]; then
   echo "Seeding admin user..."
-  NODE_PATH=/app/app/node_modules node /app/prisma/docker-seed.mjs || echo "WARN: seed failed"
+  NODE_PATH=/app/node_modules node /app/prisma/docker-seed.mjs || echo "WARN: seed failed"
 else
   echo "ADMIN_EMAIL not set; skip seed."
 fi
 
-echo "Starting Next.js..."
-exec node server.js
+# Resolve Next standalone server.js (flat or nested under app/)
+if [ -f /app/server.js ]; then
+  SERVER_JS=/app/server.js
+elif [ -f /app/app/server.js ]; then
+  SERVER_JS=/app/app/server.js
+  cd /app/app
+else
+  echo "ERROR: server.js not found under /app"
+  find /app -name 'server.js' -type f 2>/dev/null | head -20
+  exit 1
+fi
+
+echo "Starting Next.js ($SERVER_JS)..."
+exec node "$SERVER_JS"
