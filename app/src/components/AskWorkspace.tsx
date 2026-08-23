@@ -151,71 +151,120 @@ function FeedbackButtons({
   );
 }
 
+type RailDoc = ChatCitation & { usedInAnswer?: boolean };
+
 function SourcesPanel({
-  citations,
+  docs,
   previewId,
   onSelect,
   onClose,
   className,
 }: {
-  citations: ChatCitation[];
+  docs: RailDoc[];
   previewId: number | null;
   onSelect: (id: number) => void;
   onClose: () => void;
   className?: string;
 }) {
+  const activeIndex = docs.findIndex((d) => d.id === previewId);
+  const hasNav = docs.length > 1;
+
+  function goPrev() {
+    if (!hasNav) return;
+    const i = activeIndex < 0 ? 0 : (activeIndex - 1 + docs.length) % docs.length;
+    onSelect(docs[i].id);
+  }
+
+  function goNext() {
+    if (!hasNav) return;
+    const i = activeIndex < 0 ? 0 : (activeIndex + 1) % docs.length;
+    onSelect(docs[i].id);
+  }
+
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
-      <div className="flex items-center justify-between px-4 py-3">
-        <div>
+      <div className="flex items-center justify-between gap-2 px-4 py-3">
+        <div className="min-w-0">
           <p className="auth-display text-sm font-bold text-[var(--auth-ink)]">
             Sumber
           </p>
           <p className="text-[11px] text-[var(--auth-ink)]/40">
-            Bukti dari jawaban
+            {docs.length > 0
+              ? `${docs.length} dokumen · klik Preview untuk cek cepat`
+              : "Bukti dari jawaban"}
           </p>
         </div>
         <button
           type="button"
           onClick={onClose}
-          className="p-1.5 text-[var(--auth-ink)]/30 hover:text-[var(--auth-ink)]"
+          className="shrink-0 p-1.5 text-[var(--auth-ink)]/30 hover:text-[var(--auth-ink)]"
           aria-label="Tutup sumber"
         >
           <X size={16} />
         </button>
       </div>
 
-      <ul className="max-h-36 space-y-0 overflow-y-auto border-y border-[var(--auth-ink)]/[0.06] px-2 py-1">
-        {citations.map((c) => (
-          <li key={c.id} className="flex items-center gap-1 px-1">
-            <button
-              type="button"
-              onClick={() => onSelect(c.id)}
-              className={cn(
-                "shrink-0 p-1.5 transition",
-                previewId === c.id
-                  ? "text-[var(--auth-teal)]"
-                  : "text-[var(--auth-ink)]/35 hover:text-[var(--auth-teal)]"
-              )}
-              aria-label="Tampil di panel"
-              title="Tampil di panel"
-            >
-              <Eye size={12} />
-            </button>
-            <DocPreviewLink
-              docId={c.id}
-              className={cn(
-                "min-w-0 flex-1 py-2 text-xs",
-                previewId === c.id
-                  ? "font-semibold text-[var(--auth-teal-deep)]"
-                  : "text-[var(--auth-ink)]/55"
-              )}
-            >
-              {citationLabel(c)}
-            </DocPreviewLink>
-          </li>
-        ))}
-        {citations.length === 0 && (
+      <ul className="max-h-44 space-y-1 overflow-y-auto border-y border-[var(--auth-ink)]/[0.06] px-2 py-2">
+        {docs.map((c, idx) => {
+          const selected = previewId === c.id;
+          return (
+            <li key={c.id}>
+              <div
+                className={cn(
+                  "flex items-start gap-2 rounded-lg px-2 py-2 transition",
+                  selected
+                    ? "bg-[var(--auth-teal)]/10 ring-1 ring-[var(--auth-teal)]/25"
+                    : "hover:bg-[var(--auth-ink)]/[0.03]"
+                )}
+              >
+                <span className="mt-0.5 w-4 shrink-0 text-[10px] font-semibold text-[var(--auth-ink)]/30">
+                  {idx + 1}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p
+                    className={cn(
+                      "text-[12px] leading-snug",
+                      selected
+                        ? "font-semibold text-[var(--auth-teal-deep)]"
+                        : "font-medium text-[var(--auth-ink)]/70"
+                    )}
+                  >
+                    {citationLabel(c)}
+                  </p>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onSelect(c.id)}
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wide",
+                        selected
+                          ? "bg-[var(--auth-teal)] text-white"
+                          : "bg-[var(--auth-teal)]/10 text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/20"
+                      )}
+                    >
+                      <Eye size={11} />
+                      {selected ? "Ditampilkan" : "Preview"}
+                    </button>
+                    {c.usedInAnswer && (
+                      <span className="text-[10px] font-semibold text-[var(--auth-teal)]">
+                        Dipakai di jawaban
+                      </span>
+                    )}
+                    <a
+                      href={`/api/documents/${c.id}/preview`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] font-medium text-[var(--auth-ink)]/35 hover:text-[var(--auth-ink)] hover:underline"
+                    >
+                      Tab baru
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </li>
+          );
+        })}
+        {docs.length === 0 && (
           <li className="px-2 py-3 text-xs text-[var(--auth-ink)]/35">
             Sumber muncul setelah Ask AI menjawab.
           </li>
@@ -225,15 +274,36 @@ function SourcesPanel({
       <div className="flex min-h-0 flex-1 flex-col">
         {previewId ? (
           <>
-            <div className="flex items-center gap-4 px-4 py-2.5">
+            <div className="flex items-center gap-2 px-3 py-2.5">
+              {hasNav && (
+                <>
+                  <button
+                    type="button"
+                    onClick={goPrev}
+                    className="rounded-md px-2 py-1 text-[11px] font-semibold text-[var(--auth-ink)]/45 hover:bg-[var(--auth-ink)]/[0.04] hover:text-[var(--auth-ink)]"
+                  >
+                    Prev
+                  </button>
+                  <span className="text-[10px] text-[var(--auth-ink)]/35">
+                    {Math.max(activeIndex, 0) + 1}/{docs.length}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={goNext}
+                    className="rounded-md px-2 py-1 text-[11px] font-semibold text-[var(--auth-ink)]/45 hover:bg-[var(--auth-ink)]/[0.04] hover:text-[var(--auth-ink)]"
+                  >
+                    Next
+                  </button>
+                </>
+              )}
               <a
                 href={`/api/documents/${previewId}/preview`}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-teal)] hover:underline"
+                className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-teal)] hover:underline"
               >
                 <Eye size={12} />
-                Buka penuh
+                Penuh
               </a>
               <a
                 href={`/api/documents/${previewId}/download`}
@@ -244,6 +314,7 @@ function SourcesPanel({
               </a>
             </div>
             <iframe
+              key={previewId}
               title="Document preview"
               src={`/api/documents/${previewId}/preview`}
               className="min-h-0 w-full flex-1 bg-[var(--auth-paper)]"
@@ -251,7 +322,7 @@ function SourcesPanel({
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-[var(--auth-ink)]/35">
-            Pilih sumber untuk melihat preview.
+            Pilih Preview pada dokumen di atas.
           </div>
         )}
       </div>
@@ -291,6 +362,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   const [mentionLoading, setMentionLoading] = useState(false);
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [lastFocusIds, setLastFocusIds] = useState<number[]>([]);
+  const [railDocs, setRailDocs] = useState<RailDoc[]>([]);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -308,11 +380,22 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     return [] as ChatCitation[];
   }, [messages]);
 
+  const panelDocs = useMemo(() => {
+    if (railDocs.length > 0) return railDocs;
+    return activeCitations.map((c) => ({ ...c, usedInAnswer: true }));
+  }, [railDocs, activeCitations]);
+
   useEffect(() => {
-    if (activeCitations.length > 0 && previewId == null) {
-      setPreviewId(activeCitations[0].id);
+    if (panelDocs.length > 0 && previewId == null) {
+      setPreviewId(panelDocs[0].id);
     }
-  }, [activeCitations, previewId]);
+  }, [panelDocs, previewId]);
+
+  function openSourcePreview(id: number) {
+    setPreviewId(id);
+    setRailOpen(true);
+    setMobileSourcesOpen(true);
+  }
 
   const mentionMatches = useMemo(() => {
     if (!mentionOpen) return [];
@@ -511,6 +594,20 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     setPinned([]);
     setLastFocusIds([]);
     setPreviewId(null);
+    const msgs = (data.messages ?? []) as UiMessage[];
+    const lastWithCitations = [...msgs]
+      .reverse()
+      .find((m) => m.role === "assistant" && (m.citations?.length ?? 0) > 0);
+    setRailDocs(
+      (lastWithCitations?.citations ?? []).map((c) => ({
+        ...c,
+        usedInAnswer: true,
+      }))
+    );
+    if (lastWithCitations?.citations?.[0]) {
+      setPreviewId(lastWithCitations.citations[0].id);
+      setRailOpen(true);
+    }
     try {
       setScope(JSON.parse(data.scope || '{"mode":"all"}'));
     } catch {
@@ -525,6 +622,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     setPinned([]);
     setLastFocusIds([]);
     setPreviewId(null);
+    setRailDocs([]);
     textareaRef.current?.focus();
   }
 
@@ -535,6 +633,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
       setActiveId(null);
       setMessages([]);
       setPreviewId(null);
+      setRailDocs([]);
     }
     await loadConversations();
   }
@@ -720,12 +819,16 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             citations = payload.citations;
             if (citations.length > 0) {
               setLastFocusIds(citations.map((c) => c.id));
+              setRailDocs(
+                citations.map((c) => ({ ...c, usedInAnswer: false }))
+              );
               setPreviewId(citations[0].id);
+              setRailOpen(true);
               const names = citations.map((c) => citationLabel(c));
               setStatus(
                 names.length === 1
                   ? `Membaca: ${names[0]}`
-                  : `Membaca ${names.length} dokumen: ${names.join(", ")}`
+                  : `Membaca ${names.length} dokumen…`
               );
             } else {
               setStatus("Menulis jawaban…");
@@ -745,21 +848,36 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
               return next;
             });
             if (citations.length > 0) {
-              const names = citations.map((c) => citationLabel(c));
               setStatus(
-                names.length === 1
-                  ? `Menulis dari: ${names[0]}`
-                  : `Menulis dari ${names.length} dokumen…`
+                citations.length === 1
+                  ? `Menulis dari: ${citationLabel(citations[0])}`
+                  : `Menulis dari ${citations.length} dokumen…`
               );
             } else {
               setStatus("Menulis jawaban…");
             }
           }
           if (payload.type === "citations" && payload.citations) {
-            citations = payload.citations;
-            if (citations[0]) {
-              setLastFocusIds(citations.map((c) => c.id));
-              setPreviewId(citations[0].id);
+            const used = payload.citations;
+            citations = used;
+            const usedIds = new Set(used.map((c) => c.id));
+            setRailDocs((prev) => {
+              const byId = new Map<number, RailDoc>();
+              for (const c of prev) byId.set(c.id, { ...c, usedInAnswer: false });
+              for (const c of used) {
+                byId.set(c.id, { ...c, usedInAnswer: true });
+              }
+              // Used docs first, then other candidates
+              const usedList = used.map((c) => byId.get(c.id)!);
+              const rest = [...byId.values()].filter((c) => !usedIds.has(c.id));
+              return [...usedList, ...rest];
+            });
+            if (used[0]) {
+              setLastFocusIds(used.map((c) => c.id));
+              setPreviewId(used[0].id);
+              setRailOpen(true);
+            } else if (citations.length === 0) {
+              // keep candidate rail from reading phase
               setRailOpen(true);
             }
           }
@@ -829,7 +947,8 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   }
 
   const emptyLibrary = documentCount === 0;
-  const showDesktopRail = railOpen && (activeCitations.length > 0 || previewId != null);
+  const showDesktopRail =
+    railOpen && (panelDocs.length > 0 || previewId != null);
   const activeTitle =
     conversations.find((c) => c.id === activeId)?.title ?? "Percakapan baru";
 
@@ -988,7 +1107,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           <button
             type="button"
             onClick={() => {
-              if (activeCitations.length === 0 && previewId == null) return;
+              if (panelDocs.length === 0 && previewId == null) return;
               openSources();
               setRailOpen((v) => !v);
               setMobileSourcesOpen((v) => !v);
@@ -1108,16 +1227,17 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                     )}
 
                   {msg.citations && msg.citations.length > 0 && (
-                    <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+                    <div className="mt-4 flex flex-wrap gap-2">
                       {msg.citations.map((c) => (
-                        <DocPreviewLink
+                        <button
                           key={c.id}
-                          docId={c.id}
-                          className="inline-flex max-w-full items-center gap-1.5 text-[12px] font-medium text-[var(--auth-teal)]"
+                          type="button"
+                          onClick={() => openSourcePreview(c.id)}
+                          className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-[var(--auth-teal)]/10 px-2 py-1 text-[12px] font-medium text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/15"
                         >
-                          <FileText size={12} className="shrink-0 opacity-70" />
+                          <Eye size={12} className="shrink-0 opacity-70" />
                           <span className="truncate">{citationLabel(c)}</span>
-                        </DocPreviewLink>
+                        </button>
                       ))}
                     </div>
                   )}
@@ -1349,7 +1469,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
       {showDesktopRail && (
         <aside className="hidden w-[min(100%,340px)] shrink-0 flex-col border-l border-[var(--auth-ink)]/[0.08] bg-white/60 backdrop-blur-sm lg:flex">
           <SourcesPanel
-            citations={activeCitations}
+            docs={panelDocs}
             previewId={previewId}
             onSelect={setPreviewId}
             onClose={() => setRailOpen(false)}
@@ -1369,7 +1489,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           <div className="absolute inset-x-0 bottom-0 flex h-[78vh] flex-col rounded-t-2xl bg-white shadow-xl">
             <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-[var(--auth-ink)]/15" />
             <SourcesPanel
-              citations={activeCitations}
+              docs={panelDocs}
               previewId={previewId}
               onSelect={setPreviewId}
               onClose={() => setMobileSourcesOpen(false)}
