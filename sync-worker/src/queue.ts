@@ -234,6 +234,8 @@ export function startBackgroundTasks(): void {
     }, 60_000)
   );
 
+  // OCR reconcile frequently so UI status catches up soon after Paperless finishes
+  const ocrReconcileMs = Number(process.env.OCR_RECONCILE_INTERVAL_MS ?? 15_000);
   intervals.push(
     setInterval(async () => {
       try {
@@ -245,7 +247,7 @@ export function startBackgroundTasks(): void {
       } catch (err) {
         console.error("[reconcile] error:", err);
       }
-    }, 60_000)
+    }, Math.max(5_000, ocrReconcileMs))
   );
 }
 

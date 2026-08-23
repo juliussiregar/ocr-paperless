@@ -186,19 +186,38 @@ export async function GET(
   if (authz.error) return authz.error;
   const job = authz.job!;
 
-  const ocrPendingCount = job.triggeredById
-    ? await prisma.syncFile.count({
-        where: {
-          userId: job.triggeredById,
-          syncStatus: SyncStatus.OCR_PENDING,
-        },
-      })
-    : 0;
+  const userId = job.triggeredById;
+  const since = job.startedAt ?? job.createdAt;
+
+  const [ocrPendingCount, ocrDoneCount] = userId
+    ? await Promise.all([
+        prisma.syncFile.count({
+          where: {
+            userId,
+            syncStatus: SyncStatus.OCR_PENDING,
+          },
+        }),
+        prisma.syncFile.count({
+          where: {
+            userId,
+            syncStatus: SyncStatus.OCR_DONE,
+            updatedAt: { gte: since },
+          },
+        }),
+      ])
+    : [0, 0];
+
+  // Files in the OCR pipeline for this job window (pending now + done since start)
+  const ocrTotalCount = ocrPendingCount + ocrDoneCount;
+  const ocrProgressPercent =
+    ocrTotalCount > 0
+      ? Math.min(100, Math.round((ocrDoneCount / ocrTotalCount) * 100))
+      : null;
 
   const labels = jobPhaseLabel(job);
   const total = job.totalFiles;
   const processed = job.processedFiles;
-  const percent =
+  const ingestPercent =
     labels.phase === "discovering" || labels.phase === "paused"
       ? labels.phase === "paused" && total > 0
         ? Math.min(100, Math.round((processed / total) * 100))
@@ -211,14 +230,28 @@ export async function GET(
           ? 0
           : 100;
 
+  // After submit finishes, prefer OCR progress so the bar keeps moving
+  const showOcrProgress =
+    !statusActive(job.status) && ocrTotalCount > 0 && ocrPendingCount > 0;
+
+  const phaseTitle = showOcrProgress
+    ? "OCR Paperless sedang berjalan…"
+    : labels.title;
+  const phaseDetail = showOcrProgress
+    ? `${ocrDoneCount}/${ocrTotalCount} file OCR selesai · ${ocrPendingCount} masih diproses`
+    : labels.detail;
+
   return NextResponse.json({
     ...job,
-    phase: labels.phase,
-    phaseTitle: labels.title,
-    phaseDetail: labels.detail,
-    progressPercent: percent,
+    phase: showOcrProgress ? "ocr_wait" : labels.phase,
+    phaseTitle,
+    phaseDetail,
+    progressPercent: showOcrProgress ? ocrProgressPercent : ingestPercent,
     etaSeconds: labels.etaSeconds,
     ocrPendingCount,
+    ocrDoneCount,
+    ocrTotalCount,
+    ocrProgressPercent,
   });
 }
 

@@ -403,9 +403,9 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   }, [conversations, threadSearch]);
 
   const scopeLabel = useMemo(() => {
-    if (scope.mode === "folder") return `Folder ${scope.pathPrefix}`;
-    if (scope.mode === "docs") return "Dokumen terbaru";
-    return "Semua dokumen";
+    if (scope.mode === "folder") return `Folder: ${scope.pathPrefix}`;
+    if (scope.mode === "docs") return "5 dokumen terbaru";
+    return "Semua arsip saya";
   }, [scope]);
 
   const loadConversations = useCallback(async () => {
@@ -1285,7 +1285,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                   : "text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
               )}
             >
-              Semua
+              Semua arsip saya
             </button>
             <span className="text-[var(--auth-ink)]/20">·</span>
             <button
@@ -1310,7 +1310,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                 <span className="text-[var(--auth-ink)]/20">·</span>
                 <select
                   className={cn(
-                    "max-w-[200px] truncate border-0 bg-transparent py-0 text-[12px] outline-none",
+                    "max-w-[220px] truncate border-0 bg-transparent py-0 text-[12px] outline-none",
                     scope.mode === "folder"
                       ? "font-semibold text-[var(--auth-teal)]"
                       : "text-[var(--auth-ink)]/40"
@@ -1323,8 +1323,9 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                     if (!v) persistScope({ mode: "all" });
                     else persistScope({ mode: "folder", pathPrefix: v });
                   }}
+                  aria-label="Scope folder"
                 >
-                  <option value="">Folder…</option>
+                  <option value="">Folder ini…</option>
                   {folders.map((f) => (
                     <option key={f} value={f}>
                       {f}

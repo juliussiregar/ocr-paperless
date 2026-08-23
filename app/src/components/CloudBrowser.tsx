@@ -83,6 +83,9 @@ type IngestProgress = {
   skippedFiles?: number;
   currentFile?: string | null;
   ocrPendingCount?: number;
+  ocrDoneCount?: number;
+  ocrTotalCount?: number;
+  ocrProgressPercent?: number | null;
   errorMessage?: string | null;
   etaSeconds?: number | null;
 };
@@ -272,7 +275,7 @@ function CloudBrowserInner() {
   const [scope, setScope] = useState<"cloud" | "folder">("folder");
   const [recent, setRecent] = useState<RecentFile[]>([]);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [pdfOnly, setPdfOnly] = useState(true);
+  const [pdfOnly, setPdfOnly] = useState(false);
   const [sort, setSort] = useState<SortKey>("name");
   const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
   const [previewId, setPreviewId] = useState<number | null>(null);
@@ -312,6 +315,8 @@ function CloudBrowserInner() {
   const searchWrapRef = useRef<HTMLDivElement>(null);
   const browseReqId = useRef(0);
   const browseAbortRef = useRef<AbortController | null>(null);
+  const pathRef = useRef(path);
+  pathRef.current = path;
 
   const syncPathUrl = useCallback(
     (
@@ -329,7 +334,7 @@ function CloudBrowserInner() {
       const pdf = overrides?.pdfOnly ?? pdfOnly;
       if (sf !== "all") params.set("status", sf);
       if (sk !== "name") params.set("sort", sk);
-      if (!pdf) params.set("pdf", "0");
+      if (pdf) params.set("pdf", "1");
       const qs = params.toString();
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     },
@@ -412,27 +417,47 @@ function CloudBrowserInner() {
   const load = useCallback(
     async (targetPath: string, silent = false) => {
       const nextPath = normalizeFolderPath(targetPath);
-      const reqId = ++browseReqId.current;
 
-      if (!silent) {
-        browseAbortRef.current?.abort();
-        const ac = new AbortController();
-        browseAbortRef.current = ac;
-
-        setLoading(true);
-        setError(null);
-        setPath(nextPath);
-        setBreadcrumbs(breadcrumbsForPath(nextPath));
-        // Leave old list immediately so navigation doesn't feel like a long refresh
-        setItems([]);
-        setSelected(new Set());
-        setFocusIndex(-1);
+      // Soft refresh during scan poll must not race with folder clicks:
+      // - do not bump browseReqId / abort navigation
+      // - do not clear the list
+      // - only apply if user is still on that folder
+      if (silent) {
+        try {
+          const res = await fetch(
+            `/api/cloud/browse?path=${encodeURIComponent(targetPath)}`
+          );
+          if (normalizeFolderPath(pathRef.current) !== nextPath) return;
+          const data = await res.json();
+          if (normalizeFolderPath(pathRef.current) !== nextPath) return;
+          if (!res.ok) return;
+          setCredsMissing(false);
+          setBreadcrumbs(data.breadcrumbs ?? breadcrumbsForPath(data.path));
+          setItems(data.items ?? []);
+        } catch {
+          // ignore soft-refresh errors
+        }
+        return;
       }
+
+      const reqId = ++browseReqId.current;
+      browseAbortRef.current?.abort();
+      const ac = new AbortController();
+      browseAbortRef.current = ac;
+
+      setLoading(true);
+      setError(null);
+      setPath(nextPath);
+      setBreadcrumbs(breadcrumbsForPath(nextPath));
+      // Leave old list immediately so navigation doesn't feel like a long refresh
+      setItems([]);
+      setSelected(new Set());
+      setFocusIndex(-1);
 
       try {
         const res = await fetch(
           `/api/cloud/browse?path=${encodeURIComponent(targetPath)}`,
-          silent ? undefined : { signal: browseAbortRef.current?.signal }
+          { signal: browseAbortRef.current.signal }
         );
         if (reqId !== browseReqId.current) return;
 
@@ -450,13 +475,13 @@ function CloudBrowserInner() {
           ) {
             setCredsMissing(true);
           }
-          if (!silent && targetPath !== "/") {
+          if (targetPath !== "/") {
             clearLastFolder();
             await load("/", false);
             return;
           }
           setError(errMsg);
-          if (!silent) setItems([]);
+          setItems([]);
           return;
         }
         setCredsMissing(false);
@@ -466,14 +491,14 @@ function CloudBrowserInner() {
         setSelected(new Set());
         setFocusIndex(-1);
         saveLastFolder(data.path);
-        if (!silent) syncPathUrl(data.path);
+        syncPathUrl(data.path);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (reqId !== browseReqId.current) return;
         setError("Gagal memuat folder");
-        if (!silent) setItems([]);
+        setItems([]);
       } finally {
-        if (!silent && reqId === browseReqId.current) setLoading(false);
+        if (reqId === browseReqId.current) setLoading(false);
       }
     },
     [syncPathUrl]
@@ -527,7 +552,7 @@ function CloudBrowserInner() {
     if (sortParam && VALID_SORT.includes(sortParam as SortKey)) {
       setSort(sortParam as SortKey);
     }
-    if (pdfParam === "0") setPdfOnly(false);
+    if (pdfParam === "1") setPdfOnly(true);
 
     const fromUrl = pathFromSearchParam(searchParams.get("path"));
     const initial = normalizeFolderPath(
@@ -655,10 +680,13 @@ function CloudBrowserInner() {
           skippedFiles: job.skippedFiles,
           currentFile: job.currentFile,
           ocrPendingCount: job.ocrPendingCount ?? 0,
+          ocrDoneCount: job.ocrDoneCount ?? 0,
+          ocrTotalCount: job.ocrTotalCount ?? 0,
+          ocrProgressPercent: job.ocrProgressPercent ?? null,
           errorMessage: job.errorMessage,
           etaSeconds: job.etaSeconds ?? null,
         });
-        await load(path, true);
+        await load(pathRef.current, true);
         if (
           job.status === "RUNNING" ||
           job.status === "PENDING" ||
@@ -703,7 +731,7 @@ function CloudBrowserInner() {
     return () => {
       cancelled = true;
     };
-  }, [ingestJobId, load, loadRecent, loadQueue, path]);
+  }, [ingestJobId, load, loadRecent, loadQueue]);
 
   useEffect(() => {
     if (!watchingOcr || !ingestJobId) return;
@@ -713,16 +741,21 @@ function CloudBrowserInner() {
       if (!res.ok || cancelled) return;
       const job = await res.json();
       const pending = job.ocrPendingCount ?? 0;
+      const done = job.ocrDoneCount ?? 0;
+      const ocrTotal = job.ocrTotalCount ?? pending + done;
+      const ocrPct =
+        job.ocrProgressPercent ??
+        (ocrTotal > 0 ? Math.round((done / ocrTotal) * 100) : null);
       setIngestProgress({
         status: job.status,
         phase: pending > 0 ? "ocr_wait" : "done",
         phaseTitle:
-          pending > 0 ? "OCR Paperless masih berjalan…" : "Semua file siap",
+          pending > 0 ? "OCR Paperless sedang berjalan…" : "Semua file siap",
         phaseDetail:
           pending > 0
-            ? `${pending} file menunggu hasil OCR.`
+            ? `${done}/${ocrTotal || "?"} file OCR selesai · ${pending} masih diproses`
             : "OCR selesai untuk semua file yang dikirim.",
-        progressPercent: 100,
+        progressPercent: pending > 0 ? ocrPct : 100,
         processedFiles: job.processedFiles,
         totalFiles: job.totalFiles,
         failedFiles: job.failedFiles,
@@ -730,9 +763,12 @@ function CloudBrowserInner() {
         skippedFiles: job.skippedFiles,
         currentFile: null,
         ocrPendingCount: pending,
+        ocrDoneCount: done,
+        ocrTotalCount: ocrTotal,
+        ocrProgressPercent: ocrPct,
         errorMessage: job.errorMessage,
       });
-      await load(path, true);
+      await load(pathRef.current, true);
       if (cancelled) return;
       if (pending === 0) {
         setWatchingOcr(false);
@@ -746,7 +782,7 @@ function CloudBrowserInner() {
     return () => {
       cancelled = true;
     };
-  }, [watchingOcr, ingestJobId, path, load, loadRecent]);
+  }, [watchingOcr, ingestJobId, load, loadRecent]);
 
   const selectableItems = useMemo(
     () => items.filter((i) => i.selectable),
@@ -1633,11 +1669,23 @@ function CloudBrowserInner() {
                   </div>
                   <div className="flex flex-col items-end gap-1 text-[11px] text-[var(--auth-ink)]/45">
                     <span>
-                      {ingestProgress.processedFiles}/
-                      {ingestProgress.totalFiles || "?"} file
-                      {(ingestProgress.ocrPendingCount ?? 0) > 0 &&
-                        ` · ${ingestProgress.ocrPendingCount} OCR`}
+                      Kirim: {ingestProgress.processedFiles}/
+                      {ingestProgress.totalFiles || "?"}
                     </span>
+                    {(ingestProgress.ocrTotalCount ?? 0) > 0 && (
+                      <span className="font-semibold text-[var(--auth-teal-deep)]">
+                        OCR: {ingestProgress.ocrDoneCount ?? 0}/
+                        {ingestProgress.ocrTotalCount} selesai
+                        {(ingestProgress.ocrPendingCount ?? 0) > 0 &&
+                          ` · ${ingestProgress.ocrPendingCount} antre`}
+                      </span>
+                    )}
+                    {(ingestProgress.ocrTotalCount ?? 0) === 0 &&
+                      (ingestProgress.ocrPendingCount ?? 0) > 0 && (
+                        <span>
+                          {ingestProgress.ocrPendingCount} OCR antre
+                        </span>
+                      )}
                     {ingesting && ingestJobId && (
                       <div className="flex items-center gap-2">
                         {ingestProgress.status === "PAUSED" ? (
@@ -1700,6 +1748,30 @@ function CloudBrowserInner() {
                     />
                   )}
                 </div>
+                {(ingestProgress.ocrTotalCount ?? 0) > 0 &&
+                  (ingesting || watchingOcr) &&
+                  (ingestProgress.ocrPendingCount ?? 0) > 0 &&
+                  ingestProgress.phase !== "ocr_wait" && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] text-[var(--auth-ink)]/40">
+                        <span>Progress OCR Paperless</span>
+                        <span>
+                          {ingestProgress.ocrProgressPercent ?? 0}%
+                        </span>
+                      </div>
+                      <div className="h-1 overflow-hidden bg-amber-500/15">
+                        <div
+                          className="h-full bg-amber-600 transition-[width] duration-500"
+                          style={{
+                            width: `${Math.max(
+                              2,
+                              ingestProgress.ocrProgressPercent ?? 0
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
               </div>
             )}
           </div>

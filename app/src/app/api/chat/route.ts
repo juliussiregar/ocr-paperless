@@ -122,7 +122,9 @@ export async function POST(request: NextRequest) {
         (t) => {
           answer += t;
         },
-        focusDocIds
+        focusDocIds,
+        undefined,
+        userId
       );
       answer = result.answer;
 
@@ -199,7 +201,8 @@ export async function POST(request: NextRequest) {
           focusDocIds,
           (docsReading) => {
             send({ type: "reading", citations: docsReading });
-          }
+          },
+          userId
         );
         citations = result.citations;
         answer = result.answer;
