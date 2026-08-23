@@ -26,18 +26,26 @@ export function SafeMarkdown({
       {blocks.map((block, i) => {
         if (block.type === "ul") {
           return (
-            <ul key={i} className="list-disc space-y-1 pl-5">
+            <ul key={i} className="list-disc space-y-2 pl-5">
               {block.items.map((item, j) => (
-                <li key={j}>{renderInline(item)}</li>
+                <li key={j} className="whitespace-pre-wrap pl-1">
+                  {renderInline(item.text)}
+                </li>
               ))}
             </ul>
           );
         }
         if (block.type === "ol") {
           return (
-            <ol key={i} className="list-decimal space-y-1 pl-5">
+            <ol key={i} className="list-decimal space-y-3 pl-5">
               {block.items.map((item, j) => (
-                <li key={j}>{renderInline(item)}</li>
+                <li
+                  key={j}
+                  value={item.n}
+                  className="whitespace-pre-wrap pl-1 marker:font-semibold marker:text-[var(--auth-ink)]"
+                >
+                  {renderInline(item.text)}
+                </li>
               ))}
             </ol>
           );
@@ -75,9 +83,44 @@ export function SafeMarkdown({
   );
 }
 
+type ListItem = { n: number; text: string };
 type Block =
   | { type: "p" | "h2" | "h3"; text: string }
-  | { type: "ul" | "ol"; items: string[] };
+  | { type: "ul"; items: ListItem[] }
+  | { type: "ol"; items: ListItem[] };
+
+function isListInterrupt(line: string): boolean {
+  return (
+    /^#{1,3}\s+/.test(line) ||
+    /^\s*[-*]\s+/.test(line) ||
+    /^\s*\d+\.\s+/.test(line)
+  );
+}
+
+/** Absorb detail lines under a list item until the next marker/heading. */
+function takeContinuations(lines: string[], start: number): {
+  text: string;
+  next: number;
+} {
+  let i = start;
+  const parts: string[] = [];
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      // Allow one blank inside an item; stop if next block is unrelated
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j += 1;
+      if (j >= lines.length || isListInterrupt(lines[j])) break;
+      parts.push("");
+      i += 1;
+      continue;
+    }
+    if (isListInterrupt(line)) break;
+    parts.push(line);
+    i += 1;
+  }
+  return { text: parts.join("\n"), next: i };
+}
 
 function splitBlocks(raw: string): Block[] {
   const lines = raw.replace(/\r\n/g, "\n").split("\n");
@@ -108,20 +151,49 @@ function splitBlocks(raw: string): Block[] {
     }
 
     if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
+      const items: ListItem[] = [];
+      let n = 1;
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*[-*]\s+/, ""));
+        const head = lines[i].replace(/^\s*[-*]\s+/, "");
         i += 1;
+        const cont = takeContinuations(lines, i);
+        const text = cont.text ? `${head}\n${cont.text}` : head;
+        i = cont.next;
+        items.push({ n: n++, text });
+        while (i < lines.length && !lines[i].trim()) {
+          let j = i + 1;
+          while (j < lines.length && !lines[j].trim()) j += 1;
+          if (j < lines.length && /^\s*[-*]\s+/.test(lines[j])) {
+            i = j;
+            break;
+          }
+          break;
+        }
       }
       out.push({ type: "ul", items });
       continue;
     }
 
     if (/^\s*\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
+      const items: ListItem[] = [];
+      while (i < lines.length && /^\s*(\d+)\.\s+/.test(lines[i])) {
+        const m = lines[i].match(/^\s*(\d+)\.\s+(.*)$/);
+        const n = Number(m?.[1] ?? items.length + 1);
+        const head = m?.[2] ?? "";
         i += 1;
+        const cont = takeContinuations(lines, i);
+        const text = cont.text ? `${head}\n${cont.text}` : head;
+        i = cont.next;
+        items.push({ n, text });
+        while (i < lines.length && !lines[i].trim()) {
+          let j = i + 1;
+          while (j < lines.length && !lines[j].trim()) j += 1;
+          if (j < lines.length && /^\s*\d+\.\s+/.test(lines[j])) {
+            i = j;
+            break;
+          }
+          break;
+        }
       }
       out.push({ type: "ol", items });
       continue;
@@ -131,9 +203,8 @@ function splitBlocks(raw: string): Block[] {
     while (
       i < lines.length &&
       lines[i].trim() &&
-      !/^#{1,3}\s+/.test(lines[i]) &&
-      !/^\s*[-*]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i])
+      !isListInterrupt(lines[i]) &&
+      !/^#{1,3}\s+/.test(lines[i])
     ) {
       paras.push(lines[i]);
       i += 1;
@@ -145,7 +216,6 @@ function splitBlocks(raw: string): Block[] {
 }
 
 function renderInline(text: string): ReactNode {
-  // Escape-ish: strip angle brackets content that looks like HTML tags
   const cleaned = text.replace(/<\/?[^>]+>/g, "");
   const parts: ReactNode[] = [];
   const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;

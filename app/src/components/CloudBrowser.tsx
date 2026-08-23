@@ -39,6 +39,8 @@ import { humanizeFileName } from "@/lib/display-name";
 import {
   syncStageLabel,
   syncStageProgress,
+  humanizeSyncError,
+  formatSyncAge,
 } from "@/lib/bappenas";
 import { DocPreviewLink } from "@/components/DocPreviewLink";
 import { FolderTreeSidebar, type TreeFileOpen } from "@/components/FolderTreeSidebar";
@@ -114,6 +116,9 @@ type QueueFileItem = {
   remotePath: string;
   errorMessage?: string | null;
   syncStatus?: string;
+  updatedAt?: string;
+  ocrPendingAt?: string | null;
+  paperlessDocumentId?: number | null;
 };
 
 const LAST_FOLDER_KEY = "cloud-browser:last-folder";
@@ -271,6 +276,10 @@ function CloudBrowserInner() {
   const [ingesting, setIngesting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [watchingOcr, setWatchingOcr] = useState(false);
+  const [postIngestAsk, setPostIngestAsk] = useState<{
+    href: string;
+    label: string;
+  } | null>(null);
   const [newestLimit, setNewestLimit] = useState("10");
   const [scope, setScope] = useState<"cloud" | "folder">("folder");
   const [recent, setRecent] = useState<RecentFile[]>([]);
@@ -317,6 +326,7 @@ function CloudBrowserInner() {
   const browseAbortRef = useRef<AbortController | null>(null);
   const pathRef = useRef(path);
   pathRef.current = path;
+  const favCountsAt = useRef(0);
 
   const syncPathUrl = useCallback(
     (
@@ -341,16 +351,36 @@ function CloudBrowserInner() {
     [pathname, router, statusFilter, sort, pdfOnly]
   );
 
-  const loadFavorites = useCallback(async () => {
+  const loadFavorites = useCallback(async (opts?: { counts?: boolean }) => {
     try {
-      const res = await fetch("/api/cloud/favorites");
+      const withCounts = opts?.counts === true;
+      const res = await fetch(
+        withCounts ? "/api/cloud/favorites?counts=1" : "/api/cloud/favorites"
+      );
       if (!res.ok) return;
       const data = await res.json();
-      setFavorites(data.favorites ?? []);
+      const next = (data.favorites ?? []) as FavoriteItem[];
+      if (withCounts) {
+        setFavorites(next);
+        favCountsAt.current = Date.now();
+      } else {
+        setFavorites((prev) => {
+          const countMap = new Map(prev.map((f) => [f.path, f.newCount]));
+          return next.map((f) => ({
+            ...f,
+            newCount: countMap.get(f.path) ?? f.newCount ?? 0,
+          }));
+        });
+      }
     } catch {
       // ignore
     }
   }, []);
+
+  const refreshFavoriteCounts = useCallback(async (force = false) => {
+    if (!force && Date.now() - favCountsAt.current < 90_000) return;
+    await loadFavorites({ counts: true });
+  }, [loadFavorites]);
 
   const migrateLocalFavorites = useCallback(async () => {
     const local = readFavoritesLocal();
@@ -565,7 +595,9 @@ function CloudBrowserInner() {
     void load(initial);
     loadRecent();
     loadQueue();
-    void loadFavorites().then(() => migrateLocalFavorites());
+    void loadFavorites()
+      .then(() => migrateLocalFavorites())
+      .then(() => refreshFavoriteCounts(true));
     initialLoadDone.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
   }, []);
@@ -713,6 +745,14 @@ function CloudBrowserInner() {
                     ? ` · OCR masih jalan untuk ${job.ocrPendingCount} file`
                     : "");
             showToast(msg, "success");
+            const folderPath = pathRef.current || "/";
+            if ((job.newFiles ?? 0) > 0 || (job.ocrPendingCount ?? 0) > 0) {
+              setPostIngestAsk({
+                href: `/?folder=${encodeURIComponent(folderPath)}`,
+                label: "Tanyakan dokumen folder ini di Ask AI",
+              });
+            }
+            void refreshFavoriteCounts(true);
           } else if (job.status === "CANCELLED") {
             showToast("Pengambilan dihentikan", "success");
             setIngestProgress(null);
@@ -731,7 +771,7 @@ function CloudBrowserInner() {
     return () => {
       cancelled = true;
     };
-  }, [ingestJobId, load, loadRecent, loadQueue]);
+  }, [ingestJobId, load, loadRecent, loadQueue, refreshFavoriteCounts]);
 
   useEffect(() => {
     if (!watchingOcr || !ingestJobId) return;
@@ -773,6 +813,43 @@ function CloudBrowserInner() {
       if (pending === 0) {
         setWatchingOcr(false);
         await loadRecent();
+        void refreshFavoriteCounts(true);
+        const folderPath = pathRef.current || "/";
+        const normalized =
+          !folderPath || folderPath === "/"
+            ? "/"
+            : folderPath.replace(/\/$/, "") || "/";
+        const prefix = normalized === "/" ? null : `${normalized}/`;
+
+        const readyDocs = (await fetch("/api/cloud/recent")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)) as { files?: RecentFile[] } | null;
+
+        const ids = (readyDocs?.files ?? [])
+          .filter((f) => {
+            if (!f.paperlessDocumentId) return false;
+            if (!prefix) return true;
+            return (
+              f.remotePath === normalized || f.remotePath.startsWith(prefix)
+            );
+          })
+          .slice(0, 5)
+          .map((f) => f.paperlessDocumentId!);
+
+        if (ids.length > 0) {
+          setPostIngestAsk({
+            href: `/?doc=${ids.join(",")}&folder=${encodeURIComponent(normalized)}`,
+            label:
+              ids.length === 1
+                ? "Tanyakan dokumen ini di Ask AI"
+                : `Tanyakan ${ids.length} dokumen folder ini di Ask AI`,
+          });
+        } else {
+          setPostIngestAsk({
+            href: `/?folder=${encodeURIComponent(normalized)}`,
+            label: "Tanyakan dokumen folder ini di Ask AI",
+          });
+        }
         setTimeout(() => setIngestProgress(null), 2500);
         return;
       }
@@ -782,7 +859,7 @@ function CloudBrowserInner() {
     return () => {
       cancelled = true;
     };
-  }, [watchingOcr, ingestJobId, load, loadRecent]);
+  }, [watchingOcr, ingestJobId, load, loadRecent, refreshFavoriteCounts]);
 
   const selectableItems = useMemo(
     () => items.filter((i) => i.selectable),
@@ -1205,6 +1282,32 @@ function CloudBrowserInner() {
           </div>
         </div>
 
+        {postIngestAsk && (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-[var(--auth-teal)]/20 bg-[var(--auth-teal)]/8 px-3 py-2.5">
+            <MessageSquare
+              size={16}
+              className="shrink-0 text-[var(--auth-teal)]"
+            />
+            <p className="min-w-0 flex-1 text-[13px] text-[var(--auth-ink)]/75">
+              Pengambilan selesai.{" "}
+              <Link
+                href={postIngestAsk.href}
+                className="font-semibold text-[var(--auth-teal-deep)] hover:underline"
+              >
+                {postIngestAsk.label}
+              </Link>
+            </p>
+            <button
+              type="button"
+              onClick={() => setPostIngestAsk(null)}
+              className="p-1 text-[var(--auth-ink)]/35 hover:text-[var(--auth-ink)]"
+              aria-label="Tutup"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Global search */}
         <div ref={searchWrapRef} className="relative mt-5 max-w-lg">
           <div className="flex items-center gap-2 rounded-md border border-[var(--auth-teal)]/15 bg-white/80 px-3 shadow-[0_1px_0_rgb(11_110_99/0.06)] ring-1 ring-black/[0.02]">
@@ -1491,7 +1594,12 @@ function CloudBrowserInner() {
               >
                 <span className="truncate">{f.label || folderLabel(f.path)}</span>
                 {f.newCount > 0 && (
-                  <span className="font-semibold">{f.newCount}</span>
+                  <span
+                    className="font-semibold"
+                    title={`${f.newCount} PDF baru sejak sync terakhir`}
+                  >
+                    {f.newCount}
+                  </span>
                 )}
               </button>
             ))}
@@ -2095,7 +2203,10 @@ function CloudBrowserInner() {
               ) : (
                 <>
                   <ul className="space-y-0">
-                    {queueFiles.failed.map((f) => (
+                    {queueFiles.failed.map((f) => {
+                      const human = humanizeSyncError(f.errorMessage);
+                      const age = formatSyncAge(f.updatedAt);
+                      return (
                       <li
                         key={f.id}
                         className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--auth-ink)]/[0.06] py-2 first:border-t-0"
@@ -2115,11 +2226,13 @@ function CloudBrowserInner() {
                           <p className="truncate text-[11px] text-[var(--auth-ink)]/35">
                             {f.remotePath}
                           </p>
-                          {f.errorMessage && (
-                            <p className="mt-0.5 truncate text-[11px] text-amber-700">
-                              {f.errorMessage}
-                            </p>
-                          )}
+                          <p className="mt-0.5 text-[11px] font-medium text-amber-800">
+                            {human.title}
+                            {age ? ` · ${age}` : ""}
+                          </p>
+                          <p className="truncate text-[10px] text-amber-700/80">
+                            {human.hint}
+                          </p>
                         </button>
                         <button
                           type="button"
@@ -2130,10 +2243,11 @@ function CloudBrowserInner() {
                           className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold text-[var(--auth-teal)] disabled:opacity-40"
                         >
                           <RotateCcw size={11} />
-                          Retry
+                          Coba OCR lagi
                         </button>
                       </li>
-                    ))}
+                      );
+                    })}
                   </ul>
                   {queueFiles.failed.length > 0 && (
                     <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -2143,7 +2257,7 @@ function CloudBrowserInner() {
                         disabled={ingesting}
                         className="text-[12px] font-semibold text-[var(--auth-teal)] disabled:opacity-40"
                       >
-                        Retry failed (max {scanLimits.retryBatch}/batch)
+                        Coba OCR lagi semua (max {scanLimits.retryBatch}/batch)
                       </button>
                       {queueFiles.failedHasMore && (
                         <button
@@ -2174,7 +2288,13 @@ function CloudBrowserInner() {
               ) : (
                 <>
                   <ul className="space-y-0">
-                    {queueFiles.processing.map((f) => (
+                    {queueFiles.processing.map((f) => {
+                      const age = formatSyncAge(
+                        f.syncStatus === "OCR_PENDING"
+                          ? f.ocrPendingAt ?? f.updatedAt
+                          : f.updatedAt
+                      );
+                      return (
                       <li key={f.id}>
                         <button
                           type="button"
@@ -2193,12 +2313,15 @@ function CloudBrowserInner() {
                           </p>
                           {f.syncStatus && (
                             <p className="text-[10px] text-[var(--auth-teal)]">
-                              {syncStageLabel(f.syncStatus)}
+                              {f.syncStatus === "OCR_PENDING"
+                                ? `Menunggu OCR Paperless${age ? ` · ${age}` : ""} (batas ${scanLimits.ocrTimeoutMinutes} mnt)`
+                                : syncStageLabel(f.syncStatus)}
                             </p>
                           )}
                         </button>
                       </li>
-                    ))}
+                      );
+                    })}
                   </ul>
                   {queueFiles.processingHasMore && (
                     <button
@@ -2313,6 +2436,8 @@ function FileProgress({
     stage === "DOWNLOADING" ||
     stage === "QUEUED" ||
     stage === "OCR_PENDING";
+  const human =
+    stage === "FAILED" ? humanizeSyncError(errorMessage) : null;
 
   return (
     <div className="mt-1.5 max-w-sm">
@@ -2330,7 +2455,12 @@ function FileProgress({
           style={{ width: `${Math.max(4, pct)}%` }}
         />
       </div>
-      {errorMessage && (
+      {human && (
+        <p className="mt-0.5 truncate text-[10px] text-amber-700" title={human.hint}>
+          {human.title}: {human.hint}
+        </p>
+      )}
+      {!human && errorMessage && (
         <p className="mt-0.5 truncate text-[10px] text-amber-700">
           {errorMessage}
         </p>

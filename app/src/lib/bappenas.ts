@@ -105,3 +105,72 @@ export function mapSyncStatusToUi(
   if (syncStatus === "FAILED") return "failed";
   return "not_ingested";
 }
+
+/** Map raw SyncFile.errorMessage to short title + suggestion (ID). */
+export function humanizeSyncError(raw: string | null | undefined): {
+  title: string;
+  hint: string;
+} {
+  const msg = (raw ?? "").trim();
+  if (!msg) {
+    return {
+      title: "Gagal diproses",
+      hint: "Coba OCR lagi dari antrean gagal.",
+    };
+  }
+  const lower = msg.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("ocr timeout")) {
+    return {
+      title: "OCR timeout",
+      hint: "Paperless belum selesai dalam batas waktu. Tekan Coba OCR lagi.",
+    };
+  }
+  if (lower.includes("macet") || lower.includes("stuck")) {
+    return {
+      title: "Proses macet",
+      hint: "File antre terlalu lama tanpa scan aktif. Aman untuk Coba OCR lagi.",
+    };
+  }
+  if (
+    lower.includes("dibatalkan") ||
+    lower.includes("cancelled") ||
+    lower.includes("cancel")
+  ) {
+    return {
+      title: "Dibatalkan",
+      hint: "Belum sempat OCR. Tekan Coba OCR lagi bila masih dibutuhkan.",
+    };
+  }
+  if (
+    lower.includes("econn") ||
+    lower.includes("network") ||
+    lower.includes("fetch failed") ||
+    lower.includes("enotfound") ||
+    lower.includes("401") ||
+    lower.includes("403")
+  ) {
+    return {
+      title: "Gagal unduh / koneksi",
+      hint: "Cek koneksi WebDAV Bappenas, lalu Coba OCR lagi.",
+    };
+  }
+  return {
+    title: msg.length > 80 ? `${msg.slice(0, 77)}…` : msg,
+    hint: "Coba OCR lagi. Jika berulang, cek kredensial Cloud.",
+  };
+}
+
+/** Relative age label for pending/failed rows. */
+export function formatSyncAge(
+  iso: string | Date | null | undefined
+): string | null {
+  if (!iso) return null;
+  const t = typeof iso === "string" ? Date.parse(iso) : iso.getTime();
+  if (!Number.isFinite(t)) return null;
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60_000));
+  if (mins < 1) return "baru saja";
+  if (mins < 60) return `${mins} mnt`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 48) return `${hrs} jam`;
+  return `${Math.floor(hrs / 24)} hari`;
+}

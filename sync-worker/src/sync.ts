@@ -20,6 +20,24 @@ function downloadConcurrency(): number {
   return Math.min(4, Math.max(1, Math.floor(n)));
 }
 
+function normalizeFavoritePath(path: string): string {
+  if (!path || path === "/") return "/";
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return p.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
+
+/** Mark favorite folder as synced (delta "new since" window). */
+async function touchFavoriteSyncedAt(
+  userId: string,
+  rootPath: string
+): Promise<void> {
+  const path = normalizeFavoritePath(rootPath);
+  await prisma.cloudFavorite.updateMany({
+    where: { userId, path },
+    data: { lastSyncedAt: new Date() },
+  });
+}
+
 async function withRetries<T>(
   fn: () => Promise<T>,
   attempts = 3,
@@ -448,6 +466,12 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
           currentFile: null,
         },
       });
+      if (
+        payload &&
+        (payload.mode === "newest" || payload.mode === "all")
+      ) {
+        await touchFavoriteSyncedAt(userId, payload.rootPath);
+      }
       return;
     }
 
@@ -694,6 +718,8 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
           contentHash: hash,
           fileSize: BigInt(downloaded.size),
           syncStatus: SyncStatus.OCR_PENDING,
+          ocrPendingAt: new Date(),
+          errorMessage: null,
           lastSyncedAt: new Date(),
         },
       });
@@ -798,6 +824,10 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
         currentFile: null,
       },
     });
+
+    if (payload && (payload.mode === "newest" || payload.mode === "all")) {
+      await touchFavoriteSyncedAt(userId, payload.rootPath);
+    }
   } catch (err) {
     if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {
       const abandoned = await abandonInFlightSyncFiles(
@@ -1102,6 +1132,8 @@ async function runFullScanJob(jobId: string): Promise<void> {
             contentHash: hash,
             fileSize: BigInt(downloaded.size),
             syncStatus: SyncStatus.OCR_PENDING,
+            ocrPendingAt: new Date(),
+            errorMessage: null,
             lastSyncedAt: new Date(),
           },
         });
@@ -1203,6 +1235,7 @@ export async function reconcileOcrStatus(): Promise<{
   const cutoff = new Date(Date.now() - OCR_TIMEOUT_MIN * 60 * 1000);
 
   for (const file of pending) {
+    const pendingSince = file.ocrPendingAt ?? file.updatedAt;
     if (PAPERLESS_TOKEN && file.contentHash) {
       const docId = await findPaperlessDocumentByChecksum(file.contentHash);
       if (docId) {
@@ -1212,19 +1245,21 @@ export async function reconcileOcrStatus(): Promise<{
             syncStatus: SyncStatus.OCR_DONE,
             paperlessDocumentId: docId,
             errorMessage: null,
+            ocrPendingAt: null,
           },
         });
         done++;
+        // Embedding runs via backfillDocumentEmbeddings (non-blocking)
         continue;
       }
     }
 
-    if (file.updatedAt < cutoff) {
+    if (pendingSince < cutoff) {
       await prisma.syncFile.update({
         where: { id: file.id },
         data: {
           syncStatus: SyncStatus.FAILED,
-          errorMessage: `OCR timeout after ${OCR_TIMEOUT_MIN} minutes`,
+          errorMessage: `OCR timeout setelah ${OCR_TIMEOUT_MIN} menit. Dokumen belum muncul di Paperless. Coba OCR lagi.`,
         },
       });
       timedOut++;
@@ -1262,7 +1297,7 @@ export async function sweepStuckInFlightFiles(): Promise<number> {
     },
     data: {
       syncStatus: SyncStatus.FAILED,
-      errorMessage: `Stuck > ${mins}m without active scan; safe to retry`,
+      errorMessage: `Macet lebih dari ${mins} menit tanpa scan aktif. Aman untuk Coba OCR lagi.`,
     },
   });
 

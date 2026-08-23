@@ -1,11 +1,19 @@
 import OpenAI from "openai";
 import { searchDocuments, type PaperlessDocument } from "./paperless";
+import {
+  cosineSimilarity,
+  embedQuery,
+  isEmbeddingConfigured,
+} from "./embeddings";
 
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 const MAX_CONTEXT_DOCS = 8;
+const MAX_CANDIDATE_DOCS = 25;
 const CONTENT_CHARS_PER_DOC = 2800;
+const MAX_CHUNKS_IN_CONTEXT = 12;
+const MAX_CHUNK_CHARS = 1200;
 
 function getClient(): OpenAI | null {
   if (!apiKey?.startsWith("sk-")) return null;
@@ -16,7 +24,7 @@ export function isOpenAiConfigured(): boolean {
   return !!getClient();
 }
 
-function buildContext(docs: PaperlessDocument[]): string {
+function buildFallbackContext(docs: PaperlessDocument[]): string {
   return docs
     .map(
       (doc, i) =>
@@ -24,6 +32,135 @@ function buildContext(docs: PaperlessDocument[]): string {
     )
     .join("\n\n---\n\n");
 }
+
+type RankedChunk = {
+  paperlessDocumentId: number;
+  content: string;
+  score: number;
+};
+
+/**
+ * Hybrid: rank stored chunks by cosine vs question among candidate docs.
+ * Also keep keyword-ranked docs that have no chunks yet (head truncate).
+ */
+async function buildContext(
+  docs: PaperlessDocument[],
+  question: string,
+  userId?: string
+): Promise<{ context: string; contextDocs: PaperlessDocument[] }> {
+  if (docs.length === 0) {
+    return { context: "", contextDocs: [] };
+  }
+
+  if (!userId || !isEmbeddingConfigured()) {
+    return {
+      context: buildFallbackContext(docs.slice(0, MAX_CONTEXT_DOCS)),
+      contextDocs: docs.slice(0, MAX_CONTEXT_DOCS),
+    };
+  }
+
+  const docIds = docs.map((d) => d.id);
+  const docMap = new Map(docs.map((d) => [d.id, d]));
+
+  try {
+    const { prisma } = await import("./prisma");
+    const rows = await prisma.documentChunk.findMany({
+      where: {
+        userId,
+        paperlessDocumentId: { in: docIds },
+      },
+      select: {
+        paperlessDocumentId: true,
+        content: true,
+        embedding: true,
+        chunkIndex: true,
+      },
+      take: 800,
+    });
+
+    const docsWithChunks = new Set(rows.map((r) => r.paperlessDocumentId));
+    const queryVec = rows.length > 0 ? await embedQuery(question) : null;
+
+    const byDocSnippets = new Map<number, string[]>();
+    const chunkOrder: number[] = [];
+
+    if (queryVec && rows.length > 0) {
+      const ranked: RankedChunk[] = [];
+      for (const row of rows) {
+        const emb = row.embedding;
+        if (!Array.isArray(emb) || emb.length === 0) continue;
+        ranked.push({
+          paperlessDocumentId: row.paperlessDocumentId,
+          content: row.content,
+          score: cosineSimilarity(queryVec, emb as number[]),
+        });
+      }
+      ranked.sort((a, b) => b.score - a.score);
+      for (const c of ranked.slice(0, MAX_CHUNKS_IN_CONTEXT)) {
+        if (!byDocSnippets.has(c.paperlessDocumentId)) {
+          byDocSnippets.set(c.paperlessDocumentId, []);
+          chunkOrder.push(c.paperlessDocumentId);
+        }
+        byDocSnippets
+          .get(c.paperlessDocumentId)!
+          .push(c.content.slice(0, MAX_CHUNK_CHARS));
+      }
+    }
+
+    // Preserve keyword order for docs still missing embeddings
+    const fallbackOrder = docs
+      .map((d) => d.id)
+      .filter((id) => !docsWithChunks.has(id));
+
+    const contextDocs: PaperlessDocument[] = [];
+    const parts: string[] = [];
+    const seen = new Set<number>();
+
+    const pushDoc = (id: number, body: string) => {
+      if (seen.has(id) || contextDocs.length >= MAX_CONTEXT_DOCS) return;
+      const doc = docMap.get(id);
+      if (!doc) return;
+      seen.add(id);
+      contextDocs.push(doc);
+      const i = contextDocs.length;
+      parts.push(
+        `[Dokumen ${i}] Judul: ${doc.title}\nFile: ${doc.original_file_name}\nID: ${doc.id}\n${body}`
+      );
+    };
+
+    for (const id of chunkOrder) {
+      const snippets = byDocSnippets.get(id) ?? [];
+      pushDoc(
+        id,
+        `Cuplikan relevan:\n${snippets.join("\n\n…\n\n")}`
+      );
+    }
+    for (const id of fallbackOrder) {
+      const doc = docMap.get(id);
+      if (!doc) continue;
+      pushDoc(
+        id,
+        `Isi:\n${doc.content?.slice(0, CONTENT_CHARS_PER_DOC) ?? "(kosong)"}`
+      );
+    }
+
+    // If embeddings existed but ranked nothing useful, still fill from candidates
+    if (parts.length === 0) {
+      return {
+        context: buildFallbackContext(docs.slice(0, MAX_CONTEXT_DOCS)),
+        contextDocs: docs.slice(0, MAX_CONTEXT_DOCS),
+      };
+    }
+
+    return { context: parts.join("\n\n---\n\n"), contextDocs };
+  } catch {
+    return {
+      context: buildFallbackContext(docs.slice(0, MAX_CONTEXT_DOCS)),
+      contextDocs: docs.slice(0, MAX_CONTEXT_DOCS),
+    };
+  }
+}
+
 
 export interface ChatCitation {
   id: number;
@@ -50,6 +187,7 @@ Pilih sendiri berapa dokumen yang relevan untuk jawaban:
 - Jika pertanyaan meminta daftar, beberapa item, "apa saja", "terbaru", ringkasan lintas dokumen, atau topik yang muncul di banyak berkas, gunakan beberapa dokumen yang relevan.
 - Jangan mengarang sumber yang tidak ada di konteks.
 - Saat menyebut sumber, tulis Judul atau nama File PERSIS seperti di konteks (boleh singkat tapi harus bisa dikenali).
+- Untuk daftar (mis. "5 terbaru"), pakai markdown numbered list: baris "1. Judul", lalu detail di baris berikutnya tanpa nomor baru, lalu "2. Judul", dst. Jangan mengulang "1." untuk setiap item.
 
 Jika diminta membandingkan dua dokumen, buat perbandingan terstruktur (persamaan, perbedaan, kesimpulan).
 Jawab dalam Bahasa Indonesia, ringkas dan jelas.
@@ -209,7 +347,7 @@ async function resolveDocs(
   );
   const limit =
     extractRequestedLimit(question) ??
-    (wantsRecency(question) ? 5 : MAX_CONTEXT_DOCS);
+    (wantsRecency(question) ? 5 : MAX_CANDIDATE_DOCS);
 
   // Pin / compare: only the selected documents
   if (focus.length > 0) {
@@ -334,15 +472,16 @@ async function resolveDocs(
         );
       });
 
-  return { docs: ranked.slice(0, Math.min(limit, MAX_CONTEXT_DOCS)) };
+  return {
+    docs: ranked.slice(0, Math.min(limit, MAX_CANDIDATE_DOCS)),
+  };
 }
 
 function buildMessages(
-  docs: PaperlessDocument[],
+  context: string,
   history: ChatHistoryMessage[],
   question: string
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
-  const context = buildContext(docs);
   const prior = history.slice(-10).map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
@@ -383,9 +522,11 @@ export async function askDocuments(
     return { answer: emptyReason ?? "Tidak ada dokumen.", citations: [] };
   }
 
+  const { context, contextDocs } = await buildContext(docs, question, userId);
+
   const completion = await client.chat.completions.create({
     model,
-    messages: buildMessages(docs, history, question),
+    messages: buildMessages(context, history, question),
     temperature: 0.2,
     max_tokens: 1000,
   });
@@ -394,7 +535,7 @@ export async function askDocuments(
     completion.choices[0]?.message?.content ??
     "Maaf, tidak dapat menghasilkan jawaban.";
 
-  const all = docs.map(toCitation);
+  const all = contextDocs.map(toCitation);
   return {
     answer,
     citations: filterCitationsUsedInAnswer(answer, all),
@@ -425,7 +566,10 @@ export async function askDocumentsStream(
     userId
   );
 
-  const candidateCitations = docs.map(toCitation);
+  const { context, contextDocs } = await buildContext(docs, question, userId);
+  const candidateCitations = (
+    contextDocs.length > 0 ? contextDocs : docs.slice(0, MAX_CONTEXT_DOCS)
+  ).map(toCitation);
   // Reading status: candidates under consideration
   onDocsResolved?.(candidateCitations);
 
@@ -437,7 +581,7 @@ export async function askDocumentsStream(
 
   const stream = await client.chat.completions.create({
     model,
-    messages: buildMessages(docs, history, question),
+    messages: buildMessages(context, history, question),
     temperature: 0.2,
     max_tokens: 1200,
     stream: true,

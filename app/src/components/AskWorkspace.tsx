@@ -30,8 +30,6 @@ import type { ChatCitation } from "@/lib/openai";
 import type { ChatScope } from "@/lib/chat-scope";
 import { citationLabel, humanizeFileName } from "@/lib/display-name";
 import { SafeMarkdown } from "@/components/SafeMarkdown";
-import { DocPreviewLink } from "@/components/DocPreviewLink";
-
 type UiMessage = {
   id?: string;
   role: "user" | "assistant";
@@ -209,58 +207,47 @@ function SourcesPanel({
           const selected = previewId === c.id;
           return (
             <li key={c.id}>
-              <div
+              <button
+                type="button"
+                onClick={() => onSelect(c.id)}
                 className={cn(
-                  "flex items-start gap-2 rounded-lg px-2 py-2 transition",
+                  "flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition",
                   selected
                     ? "bg-[var(--auth-teal)]/10 ring-1 ring-[var(--auth-teal)]/25"
                     : "hover:bg-[var(--auth-ink)]/[0.03]"
                 )}
               >
-                <span className="mt-0.5 w-4 shrink-0 text-[10px] font-semibold text-[var(--auth-ink)]/30">
-                  {idx + 1}
-                </span>
                 <div className="min-w-0 flex-1">
                   <p
                     className={cn(
-                      "text-[12px] leading-snug",
+                      "select-text text-[12px] leading-snug",
                       selected
                         ? "font-semibold text-[var(--auth-teal-deep)]"
                         : "font-medium text-[var(--auth-ink)]/70"
                     )}
                   >
-                    {citationLabel(c)}
+                    {idx + 1}. {citationLabel(c)}
                   </p>
                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => onSelect(c.id)}
+                    <span
                       className={cn(
                         "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wide",
                         selected
                           ? "bg-[var(--auth-teal)] text-white"
-                          : "bg-[var(--auth-teal)]/10 text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/20"
+                          : "bg-[var(--auth-teal)]/10 text-[var(--auth-teal-deep)]"
                       )}
                     >
                       <Eye size={11} />
                       {selected ? "Ditampilkan" : "Preview"}
-                    </button>
+                    </span>
                     {c.usedInAnswer && (
                       <span className="text-[10px] font-semibold text-[var(--auth-teal)]">
                         Dipakai di jawaban
                       </span>
                     )}
-                    <a
-                      href={`/api/documents/${c.id}/preview`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[10px] font-medium text-[var(--auth-ink)]/35 hover:text-[var(--auth-ink)] hover:underline"
-                    >
-                      Tab baru
-                    </a>
                   </div>
                 </div>
-              </div>
+              </button>
             </li>
           );
         })}
@@ -297,17 +284,8 @@ function SourcesPanel({
                 </>
               )}
               <a
-                href={`/api/documents/${previewId}/preview`}
-                target="_blank"
-                rel="noreferrer"
-                className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-teal)] hover:underline"
-              >
-                <Eye size={12} />
-                Penuh
-              </a>
-              <a
                 href={`/api/documents/${previewId}/download`}
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
+                className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
               >
                 <Download size={12} />
                 Unduh
@@ -322,7 +300,7 @@ function SourcesPanel({
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-[var(--auth-ink)]/35">
-            Pilih Preview pada dokumen di atas.
+            Pilih dokumen di daftar atas untuk menampilkan preview.
           </div>
         )}
       </div>
@@ -367,7 +345,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const consumedDocParam = useRef<string | null>(null);
+  const consumedDeepLink = useRef<string | null>(null);
   const mentionDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeCitations = useMemo(() => {
@@ -523,55 +501,104 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     );
   }, [loadConversations, loadContext]);
 
-  // Deep-link from Search: /?doc=123
+  // Deep-link: /?doc=1,2&folder=/path&q=...
   useEffect(() => {
-    const raw = searchParams.get("doc");
-    if (!raw || listLoading) return;
-    if (consumedDocParam.current === raw) return;
-    const id = Number(raw);
-    if (!Number.isInteger(id) || id <= 0) return;
-    consumedDocParam.current = raw;
+    if (listLoading) return;
+    const docRaw = searchParams.get("doc");
+    const folderRaw = searchParams.get("folder");
+    const qRaw = searchParams.get("q");
+    if (!docRaw && !folderRaw && !qRaw) return;
 
-    const apply = (doc: ContextDoc) => {
-      setPinned((prev) =>
-        prev.some((p) => p.id === id) ? prev : [...prev, doc].slice(0, 5)
-      );
-      setLastFocusIds([id]);
-      setPreviewId(id);
-      setRailOpen(true);
-      setQuestion(`Ringkas isi: ${docLabel(doc)}`);
+    const key = `${docRaw ?? ""}|${folderRaw ?? ""}|${qRaw ?? ""}`;
+    if (consumedDeepLink.current === key) return;
+    consumedDeepLink.current = key;
+
+    // Always start a fresh thread so body.scope is applied on first send
+    setActiveId(null);
+    setMessages([]);
+    setRailDocs([]);
+    setError(null);
+
+    const clearParams = () => {
       router.replace("/", { scroll: false });
-      textareaRef.current?.focus();
     };
 
-    const fromList = docs.find((d) => d.id === id);
-    if (fromList) {
-      apply(fromList);
+    if (qRaw?.trim()) {
+      setQuestion(qRaw.trim());
+    }
+
+    if (folderRaw?.trim()) {
+      const pathPrefix = folderRaw.startsWith("/")
+        ? folderRaw
+        : `/${folderRaw}`;
+      setScope({ mode: "folder", pathPrefix });
+    } else if (!docRaw) {
+      setScope({ mode: "all" });
+    }
+
+    if (!docRaw) {
+      setPinned([]);
+      setLastFocusIds([]);
+      clearParams();
+      textareaRef.current?.focus();
+      return;
+    }
+
+    const ids = docRaw
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .slice(0, 5);
+
+    if (ids.length === 0) {
+      clearParams();
       return;
     }
 
     void (async () => {
-      try {
-        const res = await fetch(`/api/documents/${id}/meta`);
-        if (res.ok) {
-          const data = await res.json();
-          apply({
-            id,
-            fileName: data.fileName || data.title || `Dokumen ${id}`,
-            remotePath: data.remotePath || "",
-            displayName: data.displayName,
-          });
-          return;
+      const pinnedDocs: ContextDoc[] = [];
+      for (const id of ids) {
+        const fromList = docs.find((d) => d.id === id);
+        if (fromList) {
+          pinnedDocs.push(fromList);
+          continue;
         }
-      } catch {
-        // fall through
+        try {
+          const res = await fetch(`/api/documents/${id}/meta`);
+          if (res.ok) {
+            const data = await res.json();
+            pinnedDocs.push({
+              id,
+              fileName: data.fileName || data.title || `Dokumen ${id}`,
+              remotePath: data.remotePath || "",
+              displayName: data.displayName,
+            });
+            continue;
+          }
+        } catch {
+          // fall through
+        }
+        pinnedDocs.push({
+          id,
+          fileName: `Dokumen ${id}`,
+          remotePath: "",
+          displayName: `Dokumen ${id}`,
+        });
       }
-      apply({
-        id,
-        fileName: `Dokumen ${id}`,
-        remotePath: "",
-        displayName: `Dokumen ${id}`,
-      });
+
+      setPinned(pinnedDocs.slice(0, 5));
+      setLastFocusIds(ids);
+      setPreviewId(ids[0] ?? null);
+      setRailOpen(true);
+      if (!qRaw?.trim() && pinnedDocs[0]) {
+        setQuestion(
+          pinnedDocs.length === 1
+            ? `Ringkas isi: ${docLabel(pinnedDocs[0])}`
+            : `Bandingkan: ${pinnedDocs.map(docLabel).join(" vs ")}`
+        );
+      }
+      clearParams();
+      textareaRef.current?.focus();
     })();
   }, [searchParams, listLoading, docs, router]);
 
@@ -1322,12 +1349,13 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                   className="inline-flex max-w-full items-center gap-1.5 text-[12px] font-medium text-[var(--auth-teal-deep)]"
                 >
                   <AtSign size={11} />
-                  <DocPreviewLink
-                    docId={p.id}
-                    className="truncate text-[var(--auth-teal-deep)]"
+                  <button
+                    type="button"
+                    onClick={() => openSourcePreview(p.id)}
+                    className="truncate text-left text-[var(--auth-teal-deep)] hover:underline"
                   >
                     {docLabel(p)}
-                  </DocPreviewLink>
+                  </button>
                   <button
                     type="button"
                     onClick={() => unpinDoc(p.id)}

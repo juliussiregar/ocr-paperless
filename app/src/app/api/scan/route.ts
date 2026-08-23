@@ -131,6 +131,7 @@ export async function GET(request: NextRequest) {
           remotePath: true,
           errorMessage: true,
           updatedAt: true,
+          paperlessDocumentId: true,
         },
       }),
       prisma.syncFile.findMany({
@@ -146,6 +147,8 @@ export async function GET(request: NextRequest) {
           remotePath: true,
           syncStatus: true,
           updatedAt: true,
+          ocrPendingAt: true,
+          paperlessDocumentId: true,
         },
       }),
       prisma.syncFile.count({ where: { userId, syncStatus: "FAILED" } }),
@@ -186,6 +189,7 @@ export async function GET(request: NextRequest) {
         remotePath: f.remotePath,
         errorMessage: f.errorMessage,
         updatedAt: f.updatedAt,
+        paperlessDocumentId: f.paperlessDocumentId,
       })),
       processing: processingFiles.map((f) => ({
         id: f.id,
@@ -193,6 +197,8 @@ export async function GET(request: NextRequest) {
         remotePath: f.remotePath,
         syncStatus: f.syncStatus,
         updatedAt: f.updatedAt,
+        ocrPendingAt: f.ocrPendingAt,
+        paperlessDocumentId: f.paperlessDocumentId,
       })),
       failedHasMore: failedTotal > failedFiles.length,
       processingHasMore: processingTotal > processingFiles.length,

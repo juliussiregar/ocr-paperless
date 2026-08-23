@@ -17,6 +17,20 @@ function folderLabel(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+type FavCountPayload = {
+  favorites: Array<{
+    path: string;
+    label: string;
+    lastOpenedAt: string;
+    lastSyncedAt: string | null;
+    newCount: number;
+  }>;
+};
+
+/** Short in-memory cache so counts=1 does not hammer WebDAV. */
+const countsCache = new Map<string, { at: number; payload: FavCountPayload }>();
+const COUNTS_TTL_MS = 90_000;
+
 export async function GET(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -38,15 +52,22 @@ export async function GET(request: NextRequest) {
         path: r.path,
         label: folderLabel(r.path),
         lastOpenedAt: r.lastOpenedAt.toISOString(),
+        lastSyncedAt: r.lastSyncedAt?.toISOString() ?? null,
         newCount: 0,
       })),
     });
+  }
+
+  const cached = countsCache.get(userId);
+  if (cached && Date.now() - cached.at < COUNTS_TTL_MS) {
+    return NextResponse.json(cached.payload);
   }
 
   const creds = await getUserBappenasCreds(userId);
   const favorites = await Promise.all(
     rows.map(async (r) => {
       let newCount = 0;
+      const since = r.lastSyncedAt ?? r.lastOpenedAt;
       if (creds) {
         try {
           const client = createUserWebDav(
@@ -54,7 +75,7 @@ export async function GET(request: NextRequest) {
             creds.username,
             creds.password
           );
-          newCount = await client.countNewInFolder(r.path, r.lastOpenedAt);
+          newCount = await client.countNewInFolder(r.path, since);
         } catch {
           newCount = 0;
         }
@@ -63,12 +84,14 @@ export async function GET(request: NextRequest) {
         path: r.path,
         label: folderLabel(r.path),
         lastOpenedAt: r.lastOpenedAt.toISOString(),
+        lastSyncedAt: r.lastSyncedAt?.toISOString() ?? null,
         newCount,
       };
     })
   );
-
-  return NextResponse.json({ favorites });
+  const payload = { favorites };
+  countsCache.set(userId, { at: Date.now(), payload });
+  return NextResponse.json(payload);
 }
 
 export async function PUT(request: NextRequest) {
@@ -94,6 +117,9 @@ export async function PUT(request: NextRequest) {
   }
 
   const userId = session.user.id;
+
+  // Invalidate counts cache after favorite mutations
+  countsCache.delete(userId);
 
   if (action === "add") {
     const count = await prisma.cloudFavorite.count({ where: { userId } });
@@ -130,6 +156,7 @@ export async function PUT(request: NextRequest) {
       path: r.path,
       label: folderLabel(r.path),
       lastOpenedAt: r.lastOpenedAt.toISOString(),
+      lastSyncedAt: r.lastSyncedAt?.toISOString() ?? null,
       newCount: 0,
     })),
   });

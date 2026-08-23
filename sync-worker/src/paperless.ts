@@ -80,3 +80,21 @@ export async function getPaperlessHealth(): Promise<boolean> {
     return false;
   }
 }
+
+/** OCR / plain text body for embedding. */
+export async function getPaperlessDocumentContent(
+  id: number
+): Promise<string | null> {
+  if (!PAPERLESS_TOKEN) return null;
+  try {
+    const res = await fetch(`${PAPERLESS_URL}/api/documents/${id}/`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { content?: string };
+    return typeof data.content === "string" ? data.content : null;
+  } catch {
+    return null;
+  }
+}

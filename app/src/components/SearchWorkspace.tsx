@@ -127,6 +127,13 @@ function folderChipLabel(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+function askAiHref(docId: number, folderPath?: string): string {
+  const params = new URLSearchParams();
+  params.set("doc", String(docId));
+  if (folderPath) params.set("folder", folderPath);
+  return `/?${params.toString()}`;
+}
+
 function clearHistory() {
   localStorage.removeItem(HISTORY_KEY);
 }
@@ -759,7 +766,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                             Preview
                           </span>
                           <Link
-                            href={`/?doc=${doc.id}`}
+                            href={askAiHref(doc.id, folder || undefined)}
                             onClick={(e) => e.stopPropagation()}
                             className="inline-flex items-center gap-1 font-medium text-[var(--auth-ink)]/45 hover:text-[var(--auth-teal)]"
                           >
@@ -829,7 +836,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
               </DocPreviewLink>
               <div className="flex flex-wrap gap-3 text-[11px]">
                 <Link
-                  href={`/?doc=${selected.id}`}
+                  href={askAiHref(selected.id, folder || undefined)}
                   className="inline-flex items-center gap-1 font-semibold text-[var(--auth-teal)]"
                 >
                   <MessageSquare size={12} />
@@ -887,7 +894,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                   {selected.displayName}
                 </DocPreviewLink>
                 <Link
-                  href={`/?doc=${selected.id}`}
+                  href={askAiHref(selected.id, folder || undefined)}
                   className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-teal)]"
                 >
                   <MessageSquare size={12} />

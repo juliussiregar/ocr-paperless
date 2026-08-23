@@ -8,6 +8,7 @@ import {
   sweepStuckInFlightFiles,
   hasActiveScanJobForUser,
 } from "./sync.js";
+import { backfillDocumentEmbeddings } from "./embeddings.js";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 
@@ -209,6 +210,12 @@ export function startBackgroundTasks(): void {
     })
     .catch((err) => console.error("[reconcile:startup] error:", err));
 
+  void backfillDocumentEmbeddings()
+    .then((n) => {
+      if (n > 0) console.log(`[embed:startup] backfilled ${n}`);
+    })
+    .catch((err) => console.error("[embed:startup] error:", err));
+
   // OCR reconcile on SYNC_POLL_INTERVAL (no auto-scan here)
   intervals.push(
     setInterval(async () => {
@@ -243,6 +250,11 @@ export function startBackgroundTasks(): void {
         const swept = await sweepStuckInFlightFiles();
         if (swept > 0) {
           console.log(`[sweep] marked ${swept} stuck QUEUED/DOWNLOADING as FAILED`);
+        }
+        // Embed separately so OCR status updates stay snappy
+        const backfilled = await backfillDocumentEmbeddings();
+        if (backfilled > 0) {
+          console.log(`[embed] backfilled ${backfilled} documents`);
         }
       } catch (err) {
         console.error("[reconcile] error:", err);
