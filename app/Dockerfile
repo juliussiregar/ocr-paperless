@@ -13,21 +13,15 @@ RUN npx prisma generate --schema=/app/prisma/schema.docker.prisma
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS=--max-old-space-size=768
 RUN npm run build
-# Bundle prisma CLI + runtime deps needed at container start (migrate/db push).
-# Prefer copying prisma's own node_modules tree so transitive deps (defu, etc.) are not missed.
+# Fresh prisma CLI install so all transitive deps (dotenv, defu, c12, ...) are present.
+# Hoisted copy from Next standalone often misses optional peer deps and crash-loops migrate.
 RUN mkdir -p /prisma-bundle \
-  && cp -a node_modules/prisma node_modules/@prisma node_modules/.prisma /prisma-bundle/ \
-  && if [ -d node_modules/prisma/node_modules ]; then \
-       mkdir -p /prisma-bundle/prisma/node_modules \
-       && cp -a node_modules/prisma/node_modules/. /prisma-bundle/prisma/node_modules/; \
-     fi \
-  && for pkg in effect jiti pathe deepmerge-ts fast-check pure-rand \
-       empathetic c12 confbox destr defu exsolve giget node-fetch-native nypm \
-       ohash perfect-debounce pkg-types rc9 readdirp tinyexec tinyglobby \
-       empathic @standard-schema citty consola knitwork; do \
-       if [ -e "node_modules/$pkg" ]; then cp -a "node_modules/$pkg" /prisma-bundle/; fi; \
-     done \
-  && cp -a node_modules/bcryptjs /prisma-bundle/
+  && cd /prisma-bundle \
+  && npm init -y >/dev/null \
+  && npm install prisma@6.19.3 --omit=dev --no-fund --no-audit \
+  && cp -a /app/app/node_modules/.prisma /prisma-bundle/node_modules/ \
+  && cp -a /app/app/node_modules/@prisma/client /prisma-bundle/node_modules/@prisma/ \
+  && cp -a /app/app/node_modules/bcryptjs /prisma-bundle/node_modules/
 
 FROM node:22-alpine AS runner
 
@@ -45,7 +39,7 @@ COPY --from=builder /app/app/.next/standalone ./
 COPY --from=builder /app/app/.next/static ./app/.next/static
 COPY --from=builder /app/app/public ./app/public
 
-COPY --from=builder /prisma-bundle/ ./app/node_modules/
+COPY --from=builder /prisma-bundle/node_modules/ ./app/node_modules/
 COPY --from=builder /app/prisma /app/prisma
 
 COPY app/docker-entrypoint.sh /app/app/docker-entrypoint.sh

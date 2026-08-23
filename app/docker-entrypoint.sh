@@ -9,13 +9,16 @@ if ! $PRISMA migrate deploy --schema="$SCHEMA"; then
   echo "migrate deploy failed; continuing with db push..."
 fi
 
-# Safety net: keep DB aligned with prisma/schema.prisma on every boot
+# Safety net: keep DB aligned with prisma/schema.prisma on every boot.
+# Do not crash-loop the portal if CLI deps/schema push fail; tables may already exist.
 echo "Syncing schema (prisma db push)..."
-$PRISMA db push --schema="$SCHEMA" --skip-generate
+if ! $PRISMA db push --schema="$SCHEMA" --skip-generate; then
+  echo "WARN: prisma db push failed; continuing to start Next.js"
+fi
 
 if [ -n "${ADMIN_EMAIL:-}" ]; then
   echo "Seeding admin user..."
-  NODE_PATH=/app/app/node_modules node /app/prisma/docker-seed.mjs
+  NODE_PATH=/app/app/node_modules node /app/prisma/docker-seed.mjs || echo "WARN: seed failed"
 else
   echo "ADMIN_EMAIL not set; skip seed."
 fi
