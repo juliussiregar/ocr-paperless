@@ -40,34 +40,80 @@ function inDateRange(d: PaperlessDocument, from: string, to: string): boolean {
   return true;
 }
 
-/** Build a short OCR snippet around the first query hit. */
+const SNIPPET_CHARS = 320;
+
+/** Build an OCR snippet around the densest query-term window. */
 function buildSnippet(content: string, query: string): string {
   const text = (content || "").replace(/\s+/g, " ").trim();
   if (!text) return "";
   const tokens = query
     .toLowerCase()
-    .split(/\s+/)
-    .filter((t) => t.length > 1)
-    .slice(0, 5);
+    .split(/[^a-z0-9à-ü]+/i)
+    .filter((t) => t.length > 2)
+    .slice(0, 8);
+  if (tokens.length === 0) {
+    return (
+      text.slice(0, SNIPPET_CHARS) + (text.length > SNIPPET_CHARS ? "..." : "")
+    );
+  }
+
   const lower = text.toLowerCase();
-  let idx = -1;
-  let len = 0;
-  for (const t of tokens) {
-    const i = lower.indexOf(t);
+  // Prefer longest multi-token phrase hit first
+  let phraseIdx = -1;
+  let phraseLen = 0;
+  for (let n = Math.min(4, tokens.length); n >= 2; n--) {
+    const phrase = tokens.slice(0, n).join(" ");
+    const i = lower.indexOf(phrase);
     if (i !== -1) {
-      idx = i;
-      len = t.length;
+      phraseIdx = i;
+      phraseLen = phrase.length;
       break;
     }
   }
-  if (idx === -1) {
-    return text.slice(0, 220) + (text.length > 220 ? "..." : "");
+
+  if (phraseIdx !== -1) {
+    const start = Math.max(0, phraseIdx - 100);
+    const end = Math.min(text.length, phraseIdx + phraseLen + 180);
+    let snip = text.slice(start, end);
+    if (start > 0) snip = "..." + snip;
+    if (end < text.length) snip = snip + "...";
+    return snip;
   }
-  const start = Math.max(0, idx - 70);
-  const end = Math.min(text.length, idx + len + 120);
-  let snip = text.slice(start, end);
-  if (start > 0) snip = "..." + snip;
-  if (end < text.length) snip = snip + "...";
+
+  // Densest window: score token hits in sliding windows
+  let bestStart = 0;
+  let bestScore = -1;
+  const win = SNIPPET_CHARS;
+  const step = 60;
+  for (let start = 0; start < text.length; start += step) {
+    const end = Math.min(text.length, start + win);
+    const window = lower.slice(start, end);
+    let score = 0;
+    for (const t of tokens) {
+      let from = 0;
+      while (from < window.length) {
+        const i = window.indexOf(t, from);
+        if (i === -1) break;
+        score += t.length >= 6 ? 2 : 1;
+        from = i + t.length;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestStart = start;
+    }
+    if (end >= text.length) break;
+  }
+
+  if (bestScore <= 0) {
+    return (
+      text.slice(0, SNIPPET_CHARS) + (text.length > SNIPPET_CHARS ? "..." : "")
+    );
+  }
+
+  let snip = text.slice(bestStart, bestStart + win);
+  if (bestStart > 0) snip = "..." + snip;
+  if (bestStart + win < text.length) snip = snip + "...";
   return snip;
 }
 

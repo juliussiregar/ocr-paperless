@@ -5,6 +5,7 @@ import {
   embedQuery,
   isEmbeddingConfigured,
 } from "./embeddings";
+import { humanizeFileName } from "./display-name";
 
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
@@ -12,8 +13,15 @@ const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 const MAX_CONTEXT_DOCS = 8;
 const MAX_CANDIDATE_DOCS = 25;
 const CONTENT_CHARS_PER_DOC = 2800;
+/** Per-doc body when listing many search hits (richer than before) */
+const CONTENT_CHARS_LIST = 1400;
+const CONTENT_CHARS_DETAIL = 4500;
 const MAX_CHUNKS_IN_CONTEXT = 12;
+const MAX_CHUNKS_DETAIL = 20;
 const MAX_CHUNK_CHARS = 1200;
+const MAX_DOCS_DETAIL = 3;
+
+type AskIntent = "list" | "detail" | "compare" | "default";
 
 function getClient(): OpenAI | null {
   if (!apiKey?.startsWith("sk-")) return null;
@@ -24,11 +32,19 @@ export function isOpenAiConfigured(): boolean {
   return !!getClient();
 }
 
+function displayDocName(doc: PaperlessDocument): string {
+  const title = doc.title?.trim() ?? "";
+  const file = doc.original_file_name?.trim() ?? "";
+  const pick =
+    title && !/^\d{8,}/.test(title) && title.length >= 3 ? title : file || title;
+  return humanizeFileName(pick);
+}
+
 function buildFallbackContext(docs: PaperlessDocument[]): string {
   return docs
     .map(
       (doc, i) =>
-        `[Dokumen ${i + 1}] Judul: ${doc.title}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${doc.content?.slice(0, CONTENT_CHARS_PER_DOC) ?? "(kosong)"}`
+        `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${doc.content?.slice(0, CONTENT_CHARS_PER_DOC) ?? "(kosong)"}`
     )
     .join("\n\n---\n\n");
 }
@@ -41,22 +57,50 @@ type RankedChunk = {
 
 /**
  * Hybrid: rank stored chunks by cosine vs question among candidate docs.
- * Also keep keyword-ranked docs that have no chunks yet (head truncate).
+ * List/search questions prefer breadth (all candidates) over deep chunks.
  */
 async function buildContext(
   docs: PaperlessDocument[],
   question: string,
-  userId?: string
+  userId?: string,
+  intent: AskIntent = "default"
 ): Promise<{ context: string; contextDocs: PaperlessDocument[] }> {
   if (docs.length === 0) {
     return { context: "", contextDocs: [] };
   }
 
+  const isList = intent === "list" || wantsDocList(question);
+  const isDetail = intent === "detail" || intent === "compare";
+  const maxDocs = isDetail ? Math.min(MAX_DOCS_DETAIL, MAX_CONTEXT_DOCS) : MAX_CONTEXT_DOCS;
+  const bodyChars = isList
+    ? CONTENT_CHARS_LIST
+    : isDetail
+      ? CONTENT_CHARS_DETAIL
+      : CONTENT_CHARS_PER_DOC;
+  const maxChunks = isDetail ? MAX_CHUNKS_DETAIL : MAX_CHUNKS_IN_CONTEXT;
+  const chunksPerDoc = isDetail ? 6 : 3;
+
+  // Broad list: rich excerpts scored around query terms (not only doc head)
+  if (isList) {
+    const take = docs.slice(0, maxDocs);
+    const context = take
+      .map((doc, i) => {
+        const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+        return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
+      })
+      .join("\n\n---\n\n");
+    return { context, contextDocs: take };
+  }
+
   if (!userId || !isEmbeddingConfigured()) {
-    return {
-      context: buildFallbackContext(docs.slice(0, MAX_CONTEXT_DOCS)),
-      contextDocs: docs.slice(0, MAX_CONTEXT_DOCS),
-    };
+    const take = docs.slice(0, maxDocs);
+    const context = take
+      .map((doc, i) => {
+        const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+        return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
+      })
+      .join("\n\n---\n\n");
+    return { context, contextDocs: take };
   }
 
   const docIds = docs.map((d) => d.id);
@@ -75,7 +119,7 @@ async function buildContext(
         embedding: true,
         chunkIndex: true,
       },
-      take: 800,
+      take: 1200,
     });
 
     const docsWithChunks = new Set(rows.map((r) => r.paperlessDocumentId));
@@ -83,31 +127,38 @@ async function buildContext(
 
     const byDocSnippets = new Map<number, string[]>();
     const chunkOrder: number[] = [];
+    const docBestScore = new Map<number, number>();
 
     if (queryVec && rows.length > 0) {
       const ranked: RankedChunk[] = [];
       for (const row of rows) {
         const emb = row.embedding;
         if (!Array.isArray(emb) || emb.length === 0) continue;
+        const score = cosineSimilarity(queryVec, emb as number[]);
         ranked.push({
           paperlessDocumentId: row.paperlessDocumentId,
           content: row.content,
-          score: cosineSimilarity(queryVec, emb as number[]),
+          score,
         });
+        const prev = docBestScore.get(row.paperlessDocumentId) ?? -1;
+        if (score > prev) docBestScore.set(row.paperlessDocumentId, score);
       }
       ranked.sort((a, b) => b.score - a.score);
-      for (const c of ranked.slice(0, MAX_CHUNKS_IN_CONTEXT)) {
+      for (const c of ranked.slice(0, maxChunks)) {
         if (!byDocSnippets.has(c.paperlessDocumentId)) {
           byDocSnippets.set(c.paperlessDocumentId, []);
           chunkOrder.push(c.paperlessDocumentId);
         }
-        byDocSnippets
-          .get(c.paperlessDocumentId)!
-          .push(c.content.slice(0, MAX_CHUNK_CHARS));
+        const bag = byDocSnippets.get(c.paperlessDocumentId)!;
+        if (bag.length >= chunksPerDoc) continue;
+        bag.push(c.content.slice(0, MAX_CHUNK_CHARS));
       }
+      // Prefer docs with stronger chunk hits first
+      chunkOrder.sort(
+        (a, b) => (docBestScore.get(b) ?? 0) - (docBestScore.get(a) ?? 0)
+      );
     }
 
-    // Preserve keyword order for docs still missing embeddings
     const fallbackOrder = docs
       .map((d) => d.id)
       .filter((id) => !docsWithChunks.has(id));
@@ -117,14 +168,14 @@ async function buildContext(
     const seen = new Set<number>();
 
     const pushDoc = (id: number, body: string) => {
-      if (seen.has(id) || contextDocs.length >= MAX_CONTEXT_DOCS) return;
+      if (seen.has(id) || contextDocs.length >= maxDocs) return;
       const doc = docMap.get(id);
       if (!doc) return;
       seen.add(id);
       contextDocs.push(doc);
       const i = contextDocs.length;
       parts.push(
-        `[Dokumen ${i}] Judul: ${doc.title}\nFile: ${doc.original_file_name}\nID: ${doc.id}\n${body}`
+        `[Dokumen ${i}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\n${body}`
       );
     };
 
@@ -140,26 +191,38 @@ async function buildContext(
       if (!doc) continue;
       pushDoc(
         id,
-        `Isi:\n${doc.content?.slice(0, CONTENT_CHARS_PER_DOC) ?? "(kosong)"}`
+        `Isi:\n${bestContentWindow(doc.content ?? "", question, bodyChars) || "(kosong)"}`
       );
     }
 
-    // If embeddings existed but ranked nothing useful, still fill from candidates
     if (parts.length === 0) {
+      const take = docs.slice(0, maxDocs);
       return {
-        context: buildFallbackContext(docs.slice(0, MAX_CONTEXT_DOCS)),
-        contextDocs: docs.slice(0, MAX_CONTEXT_DOCS),
+        context: take
+          .map((doc, i) => {
+            const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+            return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
+          })
+          .join("\n\n---\n\n"),
+        contextDocs: take,
       };
     }
 
     return { context: parts.join("\n\n---\n\n"), contextDocs };
   } catch {
+    const take = docs.slice(0, maxDocs);
     return {
-      context: buildFallbackContext(docs.slice(0, MAX_CONTEXT_DOCS)),
-      contextDocs: docs.slice(0, MAX_CONTEXT_DOCS),
+      context: take
+        .map((doc, i) => {
+          const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+          return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
+        })
+        .join("\n\n---\n\n"),
+      contextDocs: take,
     };
   }
 }
+
 
 
 export interface ChatCitation {
@@ -182,17 +245,51 @@ const SYSTEM_PROMPT = `Kamu asisten Ask AI untuk arsip dokumen organisasi Bappen
 Jawab HANYA berdasarkan konteks dokumen yang diberikan.
 Jika informasi tidak ada di konteks, katakan dengan jujur bahwa tidak ditemukan.
 
-Pilih sendiri berapa dokumen yang relevan untuk jawaban:
-- Jika pertanyaan spesifik ke satu berkas/topik sempit, fokus ke 1 dokumen paling cocok.
-- Jika pertanyaan meminta daftar, beberapa item, "apa saja", "terbaru", ringkasan lintas dokumen, atau topik yang muncul di banyak berkas, gunakan beberapa dokumen yang relevan.
-- Jangan mengarang sumber yang tidak ada di konteks.
-- Saat menyebut sumber, tulis Judul atau nama File PERSIS seperti di konteks (boleh singkat tapi harus bisa dikenali).
-- Untuk daftar (mis. "5 terbaru"), pakai markdown numbered list: baris "1. Judul", lalu detail di baris berikutnya tanpa nomor baru, lalu "2. Judul", dst. Jangan mengulang "1." untuk setiap item.
+Mode jawaban:
+- Pencarian/daftar ("cari", "lihat dokumen tentang", "apa saja", "sebutkan"): cantumkan SEMUA dokumen di konteks. Jangan dipotong jadi 3 kalau konteks berisi 8.
+- Detail ("jelaskan", "uraikan", "apa isinya", "poin penting", "keputusan", "analisis"): gali dalam dokumen paling relevan; kutip fakta konkret (tanggal, pihak, nomor surat, agenda, keputusan) bila ada di konteks.
+- Perbandingan: hanya dokumen yang diminta; persamaan, perbedaan, kesimpulan.
+- Jangan mengarang. Saat menyebut sumber, pakai field "Nama" (bukan nama file mentah / angka panjang).
 
-Jika diminta membandingkan dua dokumen, buat perbandingan terstruktur (persamaan, perbedaan, kesimpulan).
-Jawab dalam Bahasa Indonesia, ringkas dan jelas.
-Format jawaban dengan Markdown ringan: heading ## atau ### bila perlu, bullet (- ) untuk poin, **tebal** untuk istilah penting. Jangan pakai HTML.
-Gunakan riwayat percakapan untuk memahami pertanyaan lanjutan.`;
+Format daftar (bila >1 dokumen):
+1. **Nama dokumen**
+Ringkas: 2–4 kalimat. Sertakan bila ada di teks: jenis (undangan/laporan/draft), tanggal atau nomor, agenda/topik, dan satu poin substansi penting.
+2. **Nama berikutnya**
+Ringkas: ...
+
+Format detail (satu atau sedikit dokumen):
+- Mulai dengan jawaban langsung.
+- Lanjut poin berbobot (- atau 1. 2.) berisi fakta dari teks.
+- Akhiri singkat dengan nama sumber yang dipakai.
+
+Aturan format:
+- Numbered list "1. " "2. " saja untuk daftar.
+- Jangan heading markdown (# ## ### ####).
+- Jangan label "Judul:" / "Isi Singkat:" dengan pagar.
+- **tebal** untuk nama dokumen di baris nomor; nama di baris yang sama dengan nomor.
+- "Ringkas:" di baris berikutnya tanpa nomor baru.
+
+Jawab Bahasa Indonesia, jelas. Markdown: list, **tebal**, *miring*. Tanpa HTML/heading #.
+Pakai riwayat chat untuk pertanyaan lanjutan.`;
+
+function detectIntent(question: string, hasFocus: boolean): AskIntent {
+  if (
+    /\b(bandingkan|perbandingan|bedakan|persamaan|perbedaan)\b/i.test(question) ||
+    (hasFocus && /\b vs \b/i.test(question))
+  ) {
+    return "compare";
+  }
+  if (wantsDocList(question)) return "list";
+  if (
+    hasFocus ||
+    /\b(detail|jelaskan|uraikan|analisis|poin penting|keputusan|kesimpulan|apa isi|isinya|bagaimana|mengapa|kenapa|ringkas isi|rinci|mendalam)\b/i.test(
+      question
+    )
+  ) {
+    return "detail";
+  }
+  return "default";
+}
 
 const ID_NUM: Record<string, number> = {
   satu: 1,
@@ -210,6 +307,18 @@ const ID_NUM: Record<string, number> = {
 function wantsRecency(question: string): boolean {
   return /\b(terbaru|terkini|terakhir|paling baru|recent|baru[- ]baru)\b/i.test(
     question
+  );
+}
+
+/** Broad search / list: user wants coverage, not a deep dive on one file. */
+function wantsDocList(question: string): boolean {
+  return (
+    /\b(cari|lihat|temukan|sebutkan|daftar|apa saja|apa aja|dokumen tentang|yang terkait|yang relevan|semua|berapa)\b/i.test(
+      question
+    ) &&
+    !/\b(bandingkan|perbandingan|ringkas isi|jelaskan detail|analisis mendalam|uraikan)\b/i.test(
+      question
+    )
   );
 }
 
@@ -252,6 +361,95 @@ function extractSearchQuery(question: string): string {
   return cleaned.length >= 3 ? cleaned : question.trim();
 }
 
+
+function queryTokens(question: string): string[] {
+  return question
+    .toLowerCase()
+    .split(/[^a-z0-9à-ü]+/i)
+    .map((w) => w.trim())
+    .filter(
+      (w) =>
+        w.length > 2 &&
+        !/^(yang|dan|atau|untuk|dari|dengan|pada|tentang|mengenai|cari|lihat|dokumen|file|pdf|apa|saja|aja|tolong|mohon)$/i.test(
+          w
+        )
+    );
+}
+
+/** Prefer a window of OCR text dense with query terms over the document head. */
+function bestContentWindow(content: string, question: string, maxChars: number): string {
+  const text = (content || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  const tokens = queryTokens(question).slice(0, 12);
+  if (tokens.length === 0) return text.slice(0, maxChars);
+
+  const lower = text.toLowerCase();
+  let bestStart = 0;
+  let bestScore = -1;
+  const step = Math.max(80, Math.floor(maxChars / 4));
+  for (let start = 0; start < text.length; start += step) {
+    const end = Math.min(text.length, start + maxChars);
+    const window = lower.slice(start, end);
+    let score = 0;
+    for (const t of tokens) {
+      let from = 0;
+      while (from < window.length) {
+        const i = window.indexOf(t, from);
+        if (i === -1) break;
+        score += 1 + Math.min(2, t.length / 6);
+        from = i + t.length;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestStart = start;
+    }
+    if (end >= text.length) break;
+  }
+  let slice = text.slice(bestStart, bestStart + maxChars);
+  if (bestStart > 0) slice = "…" + slice;
+  if (bestStart + maxChars < text.length) slice = slice + "…";
+  return slice;
+}
+
+function contentOverlapScore(question: string, d: PaperlessDocument): number {
+  const body = (d.content ?? "").toLowerCase().slice(0, 12000);
+  if (!body) return 0;
+  const tokens = queryTokens(question).slice(0, 10);
+  if (tokens.length === 0) return 0;
+  let hits = 0;
+  for (const t of tokens) {
+    if (body.includes(t)) hits += 1;
+  }
+  return (hits / tokens.length) * 40 + hits * 2;
+}
+
+/** Extra Paperless queries to catch alternate phrasing / partial titles. */
+function expandSearchQueries(question: string): string[] {
+  const primary = extractSearchQuery(question);
+  const out: string[] = [];
+  const push = (q: string) => {
+    const t = q.replace(/\s+/g, " ").trim();
+    if (t.length >= 3 && !out.some((x) => x.toLowerCase() === t.toLowerCase())) {
+      out.push(t);
+    }
+  };
+  push(primary);
+  const tokens = queryTokens(primary);
+  if (tokens.length >= 3) {
+    push(tokens.slice(0, 4).join(" "));
+    push(tokens.slice(-3).join(" "));
+  }
+  if (tokens.length >= 2) {
+    push(tokens.join(" "));
+  }
+  // Keep longest distinctive phrase (often the topic)
+  const quoted = question.match(/["“](.+?)["”]/);
+  if (quoted?.[1]) push(quoted[1]);
+  return out.slice(0, 4);
+}
+
 function docLabel(d: PaperlessDocument): string {
   return `${d.title} ${d.original_file_name}`.toLowerCase();
 }
@@ -286,42 +484,57 @@ export function filterCitationsUsedInAnswer(
   const text = answer.toLowerCase();
 
   const used = citations.filter((c) => {
+    const label = humanizeFileName(
+      (c.title && !/^\d{8,}/.test(c.title) ? c.title : c.fileName) || c.title || ""
+    ).toLowerCase();
     const title = (c.title || "").toLowerCase().trim();
     const file = (c.fileName || "").toLowerCase().trim();
     const base = file.replace(/\.pdf$/i, "");
 
-    if (title.length >= 6) {
-      const tip = title.slice(0, Math.min(48, title.length));
+    // Human label tip (most reliable for cleaned names in answers)
+    if (label.length >= 10) {
+      const tip = label.slice(0, Math.min(36, label.length));
       if (text.includes(tip)) return true;
     }
-    if (file.length >= 6 && text.includes(file)) return true;
-    if (base.length >= 6 && text.includes(base)) return true;
+    if (title.length >= 10) {
+      const tip = title.replace(/^\d{8,}[_-]*/, "").slice(0, 36);
+      if (tip.length >= 10 && text.includes(tip.toLowerCase())) return true;
+    }
+    if (file.length >= 12 && text.includes(file)) return true;
+    if (base.length >= 12 && text.includes(base)) return true;
 
-    const tokens = `${title} ${base}`
+    // Distinctive tokens only (skip short/common words)
+    const tokens = `${label} ${title} ${base}`
       .split(/[^a-z0-9à-ü]+/i)
-      .map((t) => t.trim())
-      .filter((t) => t.length >= 5);
+      .map((t) => t.trim().toLowerCase())
+      .filter(
+        (t) =>
+          t.length >= 7 &&
+          !/^(dokumen|undangan|laporan|rencana|sumatera|progres|rapat|finalisasi|rekonstruksi|rehabilitasi)$/i.test(
+            t
+          )
+      );
     const hits = tokens.filter((t) => text.includes(t)).length;
-    return hits >= 2 || (tokens.length === 1 && hits === 1);
+    return hits >= 2;
   });
 
   if (used.length > 0) return used;
 
-  // Soft fallback: any distinctive token hit
-  const soft = citations.filter((c) => {
-    const tokens = `${c.title} ${c.fileName}`
-      .toLowerCase()
-      .split(/[^a-z0-9à-ü]+/i)
-      .filter((t) => t.length >= 6);
-    return tokens.some((t) => text.includes(t));
+  // Soft: only long unique tip from humanized label
+  return citations.filter((c) => {
+    const label = humanizeFileName(
+      (c.title && !/^\d{8,}/.test(c.title) ? c.title : c.fileName) || ""
+    ).toLowerCase();
+    if (label.length < 14) return false;
+    const tip = label.slice(0, 28);
+    return text.includes(tip);
   });
-  return soft;
 }
 
 function toCitation(d: PaperlessDocument): ChatCitation {
   return {
     id: d.id,
-    title: d.title,
+    title: displayDocName(d),
     fileName: d.original_file_name,
   };
 }
@@ -365,8 +578,10 @@ async function resolveDocs(
   const candidates: PaperlessDocument[] = [];
   const seen = new Set<number>();
   const favoriteIds = new Set<number>();
-  const searchQ = extractSearchQuery(question);
+  const searchQueries = expandSearchQueries(question);
+  const searchQ = searchQueries[0] ?? extractSearchQuery(question);
   const ordering = wantsRecency(question) ? "-created" : undefined;
+  const intent = detectIntent(question, focus.length > 0);
 
   const addDoc = (d: PaperlessDocument) => {
     if (allowed && !allowed.has(d.id)) return;
@@ -375,18 +590,20 @@ async function resolveDocs(
     candidates.push(d);
   };
 
-  // Hybrid: full-text + title substring
-  const [fullText, titleHit] = await Promise.all([
-    searchDocuments(searchQ, { page: 1, pageSize: 25, ordering }),
-    searchDocuments(searchQ, {
-      page: 1,
-      pageSize: 25,
-      titleOnly: true,
-      ordering,
-    }),
-  ]);
-  for (const d of fullText.results) addDoc(d);
-  for (const d of titleHit.results) addDoc(d);
+  // Multi-query hybrid: full-text + title for each phrasing variant
+  for (const q of searchQueries) {
+    const [fullText, titleHit] = await Promise.all([
+      searchDocuments(q, { page: 1, pageSize: 25, ordering }),
+      searchDocuments(q, {
+        page: 1,
+        pageSize: 20,
+        titleOnly: true,
+        ordering,
+      }),
+    ]);
+    for (const d of fullText.results) addDoc(d);
+    for (const d of titleHit.results) addDoc(d);
+  }
 
   // Boost docs under favorite folders
   if (userId) {
@@ -465,33 +682,51 @@ async function resolveDocs(
     : [...candidates].sort((a, b) => {
         const favBoost = (d: PaperlessDocument) =>
           favoriteIds.has(d.id) ? 25 : 0;
-        return (
-          nameOverlapScore(question, b) +
-          favBoost(b) -
-          (nameOverlapScore(question, a) + favBoost(a))
-        );
+        const score = (d: PaperlessDocument) =>
+          nameOverlapScore(question, d) +
+          contentOverlapScore(question, d) +
+          favBoost(d);
+        return score(b) - score(a);
       });
 
+  const takeN =
+    intent === "list" || wantsDocList(question)
+      ? MAX_CONTEXT_DOCS
+      : intent === "detail" || intent === "compare"
+        ? Math.min(MAX_DOCS_DETAIL + 1, limit)
+        : Math.min(limit, MAX_CANDIDATE_DOCS);
+
   return {
-    docs: ranked.slice(0, Math.min(limit, MAX_CANDIDATE_DOCS)),
+    docs: ranked.slice(0, takeN),
   };
 }
 
 function buildMessages(
   context: string,
   history: ChatHistoryMessage[],
-  question: string
+  question: string,
+  contextDocCount: number,
+  intent: AskIntent
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const prior = history.slice(-10).map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
   }));
 
+  let modeHint = "";
+  if (intent === "list" || wantsDocList(question)) {
+    modeHint = `\n\nInstruksi tambahan: mode DAFTAR. Konteks berisi ${contextDocCount} dokumen. Cantumkan SEMUA ${contextDocCount} dokumen (masing-masing ada Ringkas 2–4 kalimat berfakta). Jangan hanya 3.`;
+  } else if (intent === "detail") {
+    modeHint = `\n\nInstruksi tambahan: mode DETAIL. Gali dokumen paling relevan. Kutip fakta konkret dari cuplikan (tanggal, nomor, pihak, agenda, keputusan) bila ada. Jawab berstruktur poin, bukan daftar panjang.`;
+  } else if (intent === "compare") {
+    modeHint = `\n\nInstruksi tambahan: mode PERBANDINGAN. Bandingkan hanya dokumen di konteks: persamaan, perbedaan, lalu kesimpulan singkat.`;
+  }
+
   return [
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "system",
-      content: `Konteks dokumen untuk pertanyaan ini:\n\n${context}`,
+      content: `Konteks dokumen untuk pertanyaan ini:\n\n${context}${modeHint}`,
     },
     ...prior,
     { role: "user", content: question },
@@ -522,13 +757,27 @@ export async function askDocuments(
     return { answer: emptyReason ?? "Tidak ada dokumen.", citations: [] };
   }
 
-  const { context, contextDocs } = await buildContext(docs, question, userId);
+  const intent = detectIntent(question, (focusDocIds?.length ?? 0) > 0);
+  const { context, contextDocs } = await buildContext(
+    docs,
+    question,
+    userId,
+    intent
+  );
+  const listMode = intent === "list" || wantsDocList(question);
+  const maxTokens = listMode ? 2200 : intent === "detail" ? 1800 : 1400;
 
   const completion = await client.chat.completions.create({
     model,
-    messages: buildMessages(context, history, question),
+    messages: buildMessages(
+      context,
+      history,
+      question,
+      contextDocs.length,
+      intent
+    ),
     temperature: 0.2,
-    max_tokens: 1000,
+    max_tokens: maxTokens,
   });
 
   const answer =
@@ -538,7 +787,9 @@ export async function askDocuments(
   const all = contextDocs.map(toCitation);
   return {
     answer,
-    citations: filterCitationsUsedInAnswer(answer, all),
+    citations: listMode
+      ? all
+      : filterCitationsUsedInAnswer(answer, all),
   };
 }
 
@@ -566,7 +817,14 @@ export async function askDocumentsStream(
     userId
   );
 
-  const { context, contextDocs } = await buildContext(docs, question, userId);
+  const intent = detectIntent(question, (focusDocIds?.length ?? 0) > 0);
+  const { context, contextDocs } = await buildContext(
+    docs,
+    question,
+    userId,
+    intent
+  );
+  const listMode = intent === "list" || wantsDocList(question);
   const candidateCitations = (
     contextDocs.length > 0 ? contextDocs : docs.slice(0, MAX_CONTEXT_DOCS)
   ).map(toCitation);
@@ -581,9 +839,15 @@ export async function askDocumentsStream(
 
   const stream = await client.chat.completions.create({
     model,
-    messages: buildMessages(context, history, question),
+    messages: buildMessages(
+      context,
+      history,
+      question,
+      contextDocs.length,
+      intent
+    ),
     temperature: 0.2,
-    max_tokens: 1200,
+    max_tokens: listMode ? 2400 : intent === "detail" ? 2000 : 1600,
     stream: true,
   });
 
@@ -601,7 +865,9 @@ export async function askDocumentsStream(
     onToken(answer);
   }
 
-  const citations = filterCitationsUsedInAnswer(answer, candidateCitations);
+  const citations = listMode
+    ? candidateCitations
+    : filterCitationsUsedInAnswer(answer, candidateCitations);
   return { answer, citations };
 }
 

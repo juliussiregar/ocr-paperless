@@ -188,7 +188,7 @@ function SourcesPanel({
           </p>
           <p className="text-[11px] text-[var(--auth-ink)]/40">
             {docs.length > 0
-              ? `${docs.length} dokumen · klik Preview untuk cek cepat`
+              ? `${docs.length} dokumen · klik nama = tab baru · mata = preview`
               : "Bukti dari jawaban"}
           </p>
         </div>
@@ -207,39 +207,30 @@ function SourcesPanel({
           const selected = previewId === c.id;
           return (
             <li key={c.id}>
-              <button
-                type="button"
-                onClick={() => onSelect(c.id)}
+              <div
                 className={cn(
-                  "flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition",
+                  "flex w-full items-start gap-2 rounded-lg px-2 py-2 transition",
                   selected
                     ? "bg-[var(--auth-teal)]/10 ring-1 ring-[var(--auth-teal)]/25"
                     : "hover:bg-[var(--auth-ink)]/[0.03]"
                 )}
               >
                 <div className="min-w-0 flex-1">
-                  <p
+                  <a
+                    href={`/api/documents/${c.id}/preview`}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     className={cn(
-                      "select-text text-[12px] leading-snug",
+                      "block select-text text-[12px] leading-snug underline-offset-2 hover:underline",
                       selected
                         ? "font-semibold text-[var(--auth-teal-deep)]"
-                        : "font-medium text-[var(--auth-ink)]/70"
+                        : "font-medium text-[var(--auth-ink)]/70 hover:text-[var(--auth-teal)]"
                     )}
+                    title="Buka di tab baru"
                   >
                     {idx + 1}. {citationLabel(c)}
-                  </p>
+                  </a>
                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    <span
-                      className={cn(
-                        "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wide",
-                        selected
-                          ? "bg-[var(--auth-teal)] text-white"
-                          : "bg-[var(--auth-teal)]/10 text-[var(--auth-teal-deep)]"
-                      )}
-                    >
-                      <Eye size={11} />
-                      {selected ? "Ditampilkan" : "Preview"}
-                    </span>
                     {c.usedInAnswer && (
                       <span className="text-[10px] font-semibold text-[var(--auth-teal)]">
                         Dipakai di jawaban
@@ -247,7 +238,24 @@ function SourcesPanel({
                     )}
                   </div>
                 </div>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => onSelect(c.id)}
+                  className={cn(
+                    "inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide",
+                    selected
+                      ? "bg-[var(--auth-teal)] text-white"
+                      : "bg-[var(--auth-teal)]/10 text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/20"
+                  )}
+                  title="Preview di panel"
+                  aria-label={`Preview ${citationLabel(c)}`}
+                >
+                  <Eye size={12} />
+                  <span className="hidden sm:inline">
+                    {selected ? "Aktif" : "Preview"}
+                  </span>
+                </button>
+              </div>
             </li>
           );
         })}
@@ -300,7 +308,7 @@ function SourcesPanel({
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-[var(--auth-ink)]/35">
-            Pilih dokumen di daftar atas untuk menampilkan preview.
+            Klik ikon mata pada dokumen di atas untuk preview di sini.
           </div>
         )}
       </div>
@@ -1254,17 +1262,33 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                     )}
 
                   {msg.citations && msg.citations.length > 0 && (
-                    <div className="mt-4 flex flex-wrap gap-2">
+                    <div className="mt-4 flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:gap-2">
                       {msg.citations.map((c) => (
-                        <button
+                        <div
                           key={c.id}
-                          type="button"
-                          onClick={() => openSourcePreview(c.id)}
-                          className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-[var(--auth-teal)]/10 px-2 py-1 text-[12px] font-medium text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/15"
+                          className="inline-flex max-w-full items-stretch overflow-hidden rounded-md bg-[var(--auth-teal)]/10 text-[12px] font-medium text-[var(--auth-teal-deep)]"
                         >
-                          <Eye size={12} className="shrink-0 opacity-70" />
-                          <span className="truncate">{citationLabel(c)}</span>
-                        </button>
+                          <a
+                            href={`/api/documents/${c.id}/preview`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="min-w-0 flex-1 px-2.5 py-1.5 text-left leading-snug hover:bg-[var(--auth-teal)]/10 hover:underline"
+                            title="Buka di tab baru"
+                          >
+                            <span className="break-words">
+                              {citationLabel(c)}
+                            </span>
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => openSourcePreview(c.id)}
+                            className="inline-flex shrink-0 items-center border-l border-[var(--auth-teal)]/15 px-2 hover:bg-[var(--auth-teal)]/15"
+                            title="Preview di panel kanan"
+                            aria-label={`Preview ${citationLabel(c)}`}
+                          >
+                            <Eye size={13} className="opacity-80" />
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}

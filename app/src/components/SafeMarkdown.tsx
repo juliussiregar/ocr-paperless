@@ -37,14 +37,16 @@ export function SafeMarkdown({
         }
         if (block.type === "ol") {
           return (
-            <ol key={i} className="list-decimal space-y-3 pl-5">
+            <ol key={i} className="list-decimal space-y-4 pl-5">
               {block.items.map((item, j) => (
                 <li
                   key={j}
                   value={item.n}
-                  className="whitespace-pre-wrap pl-1 marker:font-semibold marker:text-[var(--auth-ink)]"
+                  className="pl-1.5 marker:font-semibold marker:text-[var(--auth-ink)]"
                 >
-                  {renderInline(item.text)}
+                  <div className="space-y-1.5 whitespace-pre-wrap break-words">
+                    {renderInline(item.text)}
+                  </div>
                 </li>
               ))}
             </ol>
@@ -91,7 +93,7 @@ type Block =
 
 function isListInterrupt(line: string): boolean {
   return (
-    /^#{1,3}\s+/.test(line) ||
+    /^#{1,6}\s+/.test(line) ||
     /^\s*[-*]\s+/.test(line) ||
     /^\s*\d+\.\s+/.test(line)
   );
@@ -134,18 +136,11 @@ function splitBlocks(raw: string): Block[] {
       continue;
     }
 
-    if (/^###\s+/.test(line)) {
-      out.push({ type: "h3", text: line.replace(/^###\s+/, "") });
-      i += 1;
-      continue;
-    }
-    if (/^##\s+/.test(line)) {
-      out.push({ type: "h2", text: line.replace(/^##\s+/, "") });
-      i += 1;
-      continue;
-    }
-    if (/^#\s+/.test(line)) {
-      out.push({ type: "h2", text: line.replace(/^#\s+/, "") });
+    // Any markdown heading level → styled heading (strip pagar)
+    if (/^#{1,6}\s+/.test(line)) {
+      const text = line.replace(/^#{1,6}\s+/, "").trim();
+      const depth = (line.match(/^#+/)?.[0].length ?? 3);
+      out.push({ type: depth <= 2 ? "h2" : "h3", text });
       i += 1;
       continue;
     }
@@ -204,9 +199,10 @@ function splitBlocks(raw: string): Block[] {
       i < lines.length &&
       lines[i].trim() &&
       !isListInterrupt(lines[i]) &&
-      !/^#{1,3}\s+/.test(lines[i])
+      !/^#{1,6}\s+/.test(lines[i])
     ) {
-      paras.push(lines[i]);
+      // Strip stray leading hashes if model ignored format rules
+      paras.push(lines[i].replace(/^#{1,6}\s*/, ""));
       i += 1;
     }
     out.push({ type: "p", text: paras.join("\n") });
