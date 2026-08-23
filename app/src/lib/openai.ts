@@ -3,9 +3,15 @@ import { searchDocuments, type PaperlessDocument } from "./paperless";
 import {
   cosineSimilarity,
   embedQuery,
+  estimateTokens,
   isEmbeddingConfigured,
 } from "./embeddings";
 import { humanizeFileName } from "./display-name";
+import {
+  emptyUsage,
+  mergeUsage,
+  type OpenAiUsageSnapshot,
+} from "./openai-pricing";
 
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
@@ -64,9 +70,14 @@ async function buildContext(
   question: string,
   userId?: string,
   intent: AskIntent = "default"
-): Promise<{ context: string; contextDocs: PaperlessDocument[] }> {
+): Promise<{
+  context: string;
+  contextDocs: PaperlessDocument[];
+  embeddingHits: number;
+  embeddingTokens: number;
+}> {
   if (docs.length === 0) {
-    return { context: "", contextDocs: [] };
+    return { context: "", contextDocs: [], embeddingHits: 0, embeddingTokens: 0 };
   }
 
   const isList = intent === "list" || wantsDocList(question);
@@ -89,7 +100,7 @@ async function buildContext(
         return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
       })
       .join("\n\n---\n\n");
-    return { context, contextDocs: take };
+    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0 };
   }
 
   if (!userId || !isEmbeddingConfigured()) {
@@ -100,11 +111,13 @@ async function buildContext(
         return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
       })
       .join("\n\n---\n\n");
-    return { context, contextDocs: take };
+    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0 };
   }
 
   const docIds = docs.map((d) => d.id);
   const docMap = new Map(docs.map((d) => [d.id, d]));
+  let embeddingHits = 0;
+  let embeddingTokens = 0;
 
   try {
     const { prisma } = await import("./prisma");
@@ -123,7 +136,14 @@ async function buildContext(
     });
 
     const docsWithChunks = new Set(rows.map((r) => r.paperlessDocumentId));
-    const queryVec = rows.length > 0 ? await embedQuery(question) : null;
+    let queryVec: number[] | null = null;
+    if (rows.length > 0) {
+      queryVec = await embedQuery(question);
+      if (queryVec) {
+        embeddingHits = 1;
+        embeddingTokens = estimateTokens(question.slice(0, 8000));
+      }
+    }
 
     const byDocSnippets = new Map<number, string[]>();
     const chunkOrder: number[] = [];
@@ -205,10 +225,17 @@ async function buildContext(
           })
           .join("\n\n---\n\n"),
         contextDocs: take,
+        embeddingHits,
+        embeddingTokens,
       };
     }
 
-    return { context: parts.join("\n\n---\n\n"), contextDocs };
+    return {
+      context: parts.join("\n\n---\n\n"),
+      contextDocs,
+      embeddingHits,
+      embeddingTokens,
+    };
   } catch {
     const take = docs.slice(0, maxDocs);
     return {
@@ -219,6 +246,8 @@ async function buildContext(
         })
         .join("\n\n---\n\n"),
       contextDocs: take,
+      embeddingHits,
+      embeddingTokens,
     };
   }
 }
@@ -234,6 +263,7 @@ export interface ChatCitation {
 export interface ChatResult {
   answer: string;
   citations: ChatCitation[];
+  usage?: OpenAiUsageSnapshot;
 }
 
 export type ChatHistoryMessage = {
@@ -754,16 +784,16 @@ export async function askDocuments(
     userId
   );
   if (docs.length === 0) {
-    return { answer: emptyReason ?? "Tidak ada dokumen.", citations: [] };
+    return {
+      answer: emptyReason ?? "Tidak ada dokumen.",
+      citations: [],
+      usage: emptyUsage(model),
+    };
   }
 
   const intent = detectIntent(question, (focusDocIds?.length ?? 0) > 0);
-  const { context, contextDocs } = await buildContext(
-    docs,
-    question,
-    userId,
-    intent
-  );
+  const { context, contextDocs, embeddingHits, embeddingTokens } =
+    await buildContext(docs, question, userId, intent);
   const listMode = intent === "list" || wantsDocList(question);
   const maxTokens = listMode ? 2200 : intent === "detail" ? 1800 : 1400;
 
@@ -784,12 +814,24 @@ export async function askDocuments(
     completion.choices[0]?.message?.content ??
     "Maaf, tidak dapat menghasilkan jawaban.";
 
+  const promptTokens = completion.usage?.prompt_tokens ?? 0;
+  const completionTokens = completion.usage?.completion_tokens ?? 0;
+  const usage = mergeUsage(emptyUsage(model), {
+    model,
+    promptTokens,
+    completionTokens,
+    embeddingHits,
+    embeddingTokens,
+    chatHits: 1,
+  });
+
   const all = contextDocs.map(toCitation);
   return {
     answer,
     citations: listMode
       ? all
       : filterCitationsUsedInAnswer(answer, all),
+    usage,
   };
 }
 
@@ -818,12 +860,8 @@ export async function askDocumentsStream(
   );
 
   const intent = detectIntent(question, (focusDocIds?.length ?? 0) > 0);
-  const { context, contextDocs } = await buildContext(
-    docs,
-    question,
-    userId,
-    intent
-  );
+  const { context, contextDocs, embeddingHits, embeddingTokens } =
+    await buildContext(docs, question, userId, intent);
   const listMode = intent === "list" || wantsDocList(question);
   const candidateCitations = (
     contextDocs.length > 0 ? contextDocs : docs.slice(0, MAX_CONTEXT_DOCS)
@@ -834,7 +872,7 @@ export async function askDocumentsStream(
   if (docs.length === 0) {
     const answer = emptyReason ?? "Tidak ada dokumen.";
     onToken(answer);
-    return { answer, citations: [] };
+    return { answer, citations: [], usage: emptyUsage(model) };
   }
 
   const stream = await client.chat.completions.create({
@@ -849,10 +887,17 @@ export async function askDocumentsStream(
     temperature: 0.2,
     max_tokens: listMode ? 2400 : intent === "detail" ? 2000 : 1600,
     stream: true,
+    stream_options: { include_usage: true },
   });
 
   let answer = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
   for await (const chunk of stream) {
+    if (chunk.usage) {
+      promptTokens = chunk.usage.prompt_tokens ?? promptTokens;
+      completionTokens = chunk.usage.completion_tokens ?? completionTokens;
+    }
     const delta = chunk.choices[0]?.delta?.content ?? "";
     if (delta) {
       answer += delta;
@@ -865,10 +910,25 @@ export async function askDocumentsStream(
     onToken(answer);
   }
 
+  // Fallback estimate if provider omitted stream usage
+  if (promptTokens === 0 && completionTokens === 0) {
+    promptTokens = estimateTokens(context) + estimateTokens(question);
+    completionTokens = estimateTokens(answer);
+  }
+
+  const usage = mergeUsage(emptyUsage(model), {
+    model,
+    promptTokens,
+    completionTokens,
+    embeddingHits,
+    embeddingTokens,
+    chatHits: 1,
+  });
+
   const citations = listMode
     ? candidateCitations
     : filterCitationsUsedInAnswer(answer, candidateCitations);
-  return { answer, citations };
+  return { answer, citations, usage };
 }
 
 export function titleFromQuestion(question: string): string {

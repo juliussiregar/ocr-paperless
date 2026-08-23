@@ -29,7 +29,7 @@ export default async function AdminPage() {
       header={
         <PageHeader
           title="Admin"
-          description="Manage organisation users and their Bappenas credentials."
+          description="Audit aktivitas, biaya OpenAI, user, dan pengaturan organisasi."
         />
       }
     >

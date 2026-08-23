@@ -40,10 +40,30 @@ type SearchHit = {
   modified: string;
 };
 
+type RecentItem = {
+  id: string;
+  displayName: string;
+  fileName: string;
+  remotePath: string | null;
+  paperlessDocumentId: number;
+  lastSyncedAt: string | null;
+  updatedAt: string;
+  fileSize: number | null;
+};
+
+type SearchSummary = {
+  total: number;
+  countIsPartial: boolean;
+  topFolders: { path: string; count: number }[];
+  oldestCreated: string | null;
+  newestCreated: string | null;
+};
+
 type SortKey = "relevance" | "newest" | "oldest" | "name";
 
 const HISTORY_KEY = "docsearch:search-history";
 const HISTORY_MAX = 8;
+const RECENT_PAGE_SIZE = 20;
 
 function loadHistory(): string[] {
   try {
@@ -138,6 +158,46 @@ function clearHistory() {
   localStorage.removeItem(HISTORY_KEY);
 }
 
+function formatShortDate(iso: string | null | undefined): string {
+  if (!iso) return "-";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "-";
+  return new Date(t).toLocaleDateString("id-ID", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function formatDateRange(
+  oldest: string | null,
+  newest: string | null
+): string | null {
+  if (!oldest && !newest) return null;
+  if (oldest && newest && oldest.slice(0, 10) === newest.slice(0, 10)) {
+    return formatShortDate(oldest);
+  }
+  if (oldest && newest) {
+    return `${formatShortDate(oldest)} - ${formatShortDate(newest)}`;
+  }
+  return formatShortDate(oldest || newest);
+}
+
+/** Relative age for scan feed (Bahasa Indonesia, singkat). */
+function formatRelativeSync(iso: string | null | undefined): string {
+  if (!iso) return "-";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "-";
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60_000));
+  if (mins < 1) return "baru saja";
+  if (mins < 60) return `${mins} mnt lalu`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 48) return `${hrs} jam lalu`;
+  const days = Math.floor(hrs / 24);
+  if (days < 14) return `${days} hari lalu`;
+  return formatShortDate(iso);
+}
+
 export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -155,6 +215,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   const [dateTo, setDateTo] = useState(searchParams.get("to") ?? "");
 
   const [results, setResults] = useState<SearchHit[]>([]);
+  const [summary, setSummary] = useState<SearchSummary | null>(null);
   const [folders, setFolders] = useState<string[]>([]);
   const [count, setCount] = useState(0);
   const [countIsPartial, setCountIsPartial] = useState(false);
@@ -170,14 +231,133 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [mobilePreview, setMobilePreview] = useState(false);
 
+  const [recent, setRecent] = useState<RecentItem[]>([]);
+  const [recentPage, setRecentPage] = useState(0);
+  const [recentHasMore, setRecentHasMore] = useState(false);
+  const [recentLoading, setRecentLoading] = useState(false);
+  const [recentLoadingMore, setRecentLoadingMore] = useState(false);
+  const [recentTotal, setRecentTotal] = useState(0);
+  const [recentError, setRecentError] = useState<string | null>(null);
+
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const skipUrlWrite = useRef(false);
+  const loadMoreLock = useRef(false);
+  const recentRef = useRef<RecentItem[]>([]);
+  recentRef.current = recent;
 
-  const selected = useMemo(
-    () => results.find((r) => r.id === selectedId) ?? null,
-    [results, selectedId]
-  );
+  const selected = useMemo(() => {
+    const fromResults = results.find((r) => r.id === selectedId);
+    if (fromResults) {
+      return {
+        id: fromResults.id,
+        displayName:
+          fromResults.displayName ||
+          humanizeFileName(fromResults.title || fromResults.fileName),
+      };
+    }
+    const fromRecent = recent.find((r) => r.paperlessDocumentId === selectedId);
+    if (fromRecent) {
+      return {
+        id: fromRecent.paperlessDocumentId,
+        displayName: fromRecent.displayName || humanizeFileName(fromRecent.fileName),
+      };
+    }
+    return null;
+  }, [results, recent, selectedId]);
+
+  const loadRecent = useCallback(async (pageNum: number, append: boolean) => {
+    if (loadMoreLock.current && append) return;
+    if (append) {
+      loadMoreLock.current = true;
+      setRecentLoadingMore(true);
+    } else {
+      setRecentLoading(true);
+      setRecentError(null);
+    }
+    try {
+      let pageCursor = pageNum;
+      let guard = 0;
+      let addedAny = false;
+      let lastHasMore = false;
+      let lastTotal = 0;
+
+      // Server pages SyncFile rows; client dedupes by paperlessDocumentId.
+      // Skip empty pages so Load more never looks stuck.
+      while (guard < 6) {
+        guard += 1;
+        const params = new URLSearchParams({
+          page: String(pageCursor),
+          limit: String(RECENT_PAGE_SIZE),
+        });
+        const res = await fetch(`/api/cloud/recent?${params}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(
+            typeof data.error === "string"
+              ? data.error
+              : "Gagal memuat scan terbaru"
+          );
+        }
+        const nextFiles = ((data.files ?? []) as RecentItem[]).filter(
+          (f) => typeof f.paperlessDocumentId === "number"
+        );
+        lastTotal = Number(data.total) || nextFiles.length;
+        lastHasMore = Boolean(data.hasMore);
+        setRecentTotal(lastTotal);
+        setRecentPage(data.page ?? pageCursor);
+
+        if (append) {
+          const seenSync = new Set(recentRef.current.map((r) => r.id));
+          const seenDoc = new Set(
+            recentRef.current.map((r) => r.paperlessDocumentId)
+          );
+          const extra = nextFiles.filter(
+            (f) => !seenSync.has(f.id) && !seenDoc.has(f.paperlessDocumentId)
+          );
+          if (extra.length > 0) {
+            const merged = [...recentRef.current, ...extra];
+            recentRef.current = merged;
+            setRecent(merged);
+            addedAny = true;
+            break;
+          }
+          if (!lastHasMore) break;
+          pageCursor += 1;
+          continue;
+        }
+
+        const seenDoc = new Set<number>();
+        const unique: RecentItem[] = [];
+        for (const f of nextFiles) {
+          if (seenDoc.has(f.paperlessDocumentId)) continue;
+          seenDoc.add(f.paperlessDocumentId);
+          unique.push(f);
+        }
+        setRecent(unique);
+        addedAny = unique.length > 0;
+        break;
+      }
+
+      setRecentHasMore(lastHasMore);
+      setRecentError(null);
+      if (append && !addedAny && !lastHasMore) {
+        setRecentHasMore(false);
+      }
+    } catch (err) {
+      if (!append) {
+        setRecent([]);
+        setRecentHasMore(false);
+      }
+      setRecentError(
+        err instanceof Error ? err.message : "Gagal memuat scan terbaru"
+      );
+    } finally {
+      setRecentLoading(false);
+      setRecentLoadingMore(false);
+      loadMoreLock.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     setHistory(loadHistory());
@@ -187,6 +367,14 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         if (Array.isArray(data.folders)) setFolders(data.folders);
       })
       .catch(() => undefined);
+  }, []);
+
+  // Idle feed: load when no active search
+  useEffect(() => {
+    const q = searchParams.get("q");
+    if (q?.trim()) return;
+    void loadRecent(1, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const syncUrl = useCallback(
@@ -211,6 +399,22 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
     [pathname, router]
   );
 
+  const resetToFeed = useCallback(() => {
+    setQuery("");
+    setResults([]);
+    setSummary(null);
+    setSearched(false);
+    setSelectedId(null);
+    setError(null);
+    setQueryUsed("");
+    setQuerySanitized(false);
+    setCount(0);
+    setHasMore(false);
+    setPage(1);
+    router.replace(pathname, { scroll: false });
+    void loadRecent(1, false);
+  }, [loadRecent, pathname, router]);
+
   const runSearch = useCallback(
     async (
       opts: {
@@ -229,10 +433,12 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
       const q = opts.q.trim();
       if (!q) {
         setResults([]);
+        setSummary(null);
         setCount(0);
         setSearched(false);
         setError(null);
         setSelectedId(null);
+        void loadRecent(1, false);
         return;
       }
 
@@ -246,6 +452,8 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         setLoading(true);
         setSearched(true);
         setError(null);
+        setSelectedId(null);
+        setMobilePreview(false);
       }
 
       if (writeUrl && !skipUrlWrite.current) {
@@ -284,6 +492,9 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         setPage(data.page ?? pageNum);
         setQueryUsed(data.queryUsed ?? q);
         setQuerySanitized(Boolean(data.querySanitized));
+        if (!opts.append) {
+          setSummary((data.summary as SearchSummary | null) ?? null);
+        }
 
         if (opts.append) {
           setResults((prev) => {
@@ -302,15 +513,20 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         setError(err instanceof Error ? err.message : "Pencarian gagal");
         if (!opts.append) {
           setResults([]);
+          setSummary(null);
           setCount(0);
           setSelectedId(null);
         }
       } finally {
-        setLoading(false);
-        setLoadingMore(false);
+        // Ignore stale aborts so a newer request keeps its loading state
+        if (abortRef.current === controller) {
+          setLoading(false);
+          setLoadingMore(false);
+          loadMoreLock.current = false;
+        }
       }
     },
-    [syncUrl]
+    [loadRecent, syncUrl]
   );
 
   // Initial search from URL
@@ -353,8 +569,13 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
       to: next.to ?? dateTo,
     };
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    // Jangan spam API / riwayat untuk 1 huruf
-    if (payload.q.trim().length > 0 && payload.q.trim().length < 2) {
+    if (payload.q.trim().length === 0) {
+      debounceRef.current = setTimeout(() => {
+        resetToFeed();
+      }, 200);
+      return;
+    }
+    if (payload.q.trim().length < 2) {
       return;
     }
     debounceRef.current = setTimeout(() => {
@@ -365,6 +586,10 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!query.trim()) {
+      resetToFeed();
+      return;
+    }
     runSearch({
       q: query,
       folder,
@@ -378,16 +603,72 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
 
   function openPreview(id: number) {
     setSelectedId(id);
-    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches) {
+    if (
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 1023px)").matches
+    ) {
       setMobilePreview(true);
     }
   }
 
+  const loadMore = useCallback(() => {
+    if (searched) {
+      if (loadMoreLock.current || !hasMore || loading || loadingMore) return;
+      loadMoreLock.current = true;
+      void runSearch({
+        q: query,
+        folder,
+        titleOnly,
+        sort,
+        from: dateFrom,
+        to: dateTo,
+        page: page + 1,
+        append: true,
+      });
+      return;
+    }
+    if (
+      loadMoreLock.current ||
+      !recentHasMore ||
+      recentLoading ||
+      recentLoadingMore
+    ) {
+      return;
+    }
+    void loadRecent(recentPage + 1, true);
+  }, [
+    searched,
+    hasMore,
+    loading,
+    loadingMore,
+    query,
+    folder,
+    titleOnly,
+    sort,
+    dateFrom,
+    dateTo,
+    page,
+    runSearch,
+    recentHasMore,
+    recentLoading,
+    recentLoadingMore,
+    recentPage,
+    loadRecent,
+  ]);
+
   const emptyLibrary = documentCount === 0;
+  const showFeed = !searched && !emptyLibrary;
+  const dateRangeLabel = summary
+    ? formatDateRange(summary.oldestCreated, summary.newestCreated)
+    : null;
+  const shownSearch = results.length;
+  const shownRecent = recent.length;
+  const searchTotalLabel = countIsPartial
+    ? `${count.toLocaleString("id-ID")}+`
+    : count.toLocaleString("id-ID");
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col bg-[var(--auth-paper)] lg:flex-row">
-      {/* Results column */}
       <section className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div
           aria-hidden
@@ -403,8 +684,8 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
             Search
           </p>
           <p className="mt-2 max-w-xl text-sm text-[var(--auth-ink)]/50">
-            Cari di judul dan isi OCR dokumen Anda. Buka preview, lalu lanjutkan
-            di Ask AI bila perlu.
+            Cari di judul dan isi OCR dokumen Anda. Tanpa kata kunci, lihat
+            dokumen scan terbaru.
           </p>
           <p className="mt-1 text-[11px] text-[var(--auth-ink)]/35">
             {documentCount.toLocaleString("id-ID")} dokumen siap dicari
@@ -449,14 +730,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                   type="button"
                   onClick={() => {
                     if (debounceRef.current) clearTimeout(debounceRef.current);
-                    setQuery("");
-                    setResults([]);
-                    setSearched(false);
-                    setSelectedId(null);
-                    setError(null);
-                    setQueryUsed("");
-                    setQuerySanitized(false);
-                    router.replace(pathname, { scroll: false });
+                    resetToFeed();
                   }}
                   className="mb-2 p-1 text-[var(--auth-ink)]/30 hover:text-[var(--auth-ink)]"
                   aria-label="Hapus"
@@ -469,12 +743,15 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                 disabled={loading || !query.trim() || emptyLibrary}
                 className="mb-1 text-[12px] font-bold uppercase tracking-wider text-[var(--auth-teal)] disabled:opacity-30"
               >
-                {loading ? <Loader2 size={16} className="animate-spin" /> : "Cari"}
+                {loading ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  "Cari"
+                )}
               </button>
             </div>
           </form>
 
-          {/* Filters */}
           <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-[12px]">
             <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-ink)]/30">
               Filter
@@ -483,7 +760,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
               type="button"
               onClick={() => {
                 setFolder("");
-                scheduleSearch({ folder: "" });
+                if (searched) scheduleSearch({ folder: "" });
               }}
               className={cn(
                 !folder
@@ -500,7 +777,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                 title={f}
                 onClick={() => {
                   setFolder(f);
-                  scheduleSearch({ folder: f });
+                  if (searched) scheduleSearch({ folder: f });
                 }}
                 className={cn(
                   "max-w-[140px] truncate",
@@ -518,7 +795,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                 value={folder}
                 onChange={(e) => {
                   setFolder(e.target.value);
-                  scheduleSearch({ folder: e.target.value });
+                  if (searched) scheduleSearch({ folder: e.target.value });
                 }}
               >
                 <option value="">Folder lain…</option>
@@ -538,7 +815,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                 checked={titleOnly}
                 onChange={(e) => {
                   setTitleOnly(e.target.checked);
-                  scheduleSearch({ titleOnly: e.target.checked });
+                  if (searched) scheduleSearch({ titleOnly: e.target.checked });
                 }}
                 className="accent-[var(--auth-teal)]"
               />
@@ -550,7 +827,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
               onChange={(e) => {
                 const s = e.target.value as SortKey;
                 setSort(s);
-                scheduleSearch({ sort: s });
+                if (searched) scheduleSearch({ sort: s });
               }}
               className="border-0 bg-transparent text-[12px] text-[var(--auth-ink)]/50 outline-none"
             >
@@ -565,7 +842,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
               value={dateFrom}
               onChange={(e) => {
                 setDateFrom(e.target.value);
-                scheduleSearch({ from: e.target.value });
+                if (searched) scheduleSearch({ from: e.target.value });
               }}
               className="border-0 bg-transparent text-[11px] text-[var(--auth-ink)]/45 outline-none"
               title="Dari tanggal"
@@ -576,7 +853,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
               value={dateTo}
               onChange={(e) => {
                 setDateTo(e.target.value);
-                scheduleSearch({ to: e.target.value });
+                if (searched) scheduleSearch({ to: e.target.value });
               }}
               className="border-0 bg-transparent text-[11px] text-[var(--auth-ink)]/45 outline-none"
               title="Sampai tanggal"
@@ -629,9 +906,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         </div>
 
         <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-4 lg:px-8">
-          {error && (
-            <p className="mb-3 text-sm text-red-700">{error}</p>
-          )}
+          {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
 
           {querySanitized && searched && queryUsed && (
             <p className="mb-3 text-[12px] text-[var(--auth-ink)]/45">
@@ -643,54 +918,247 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
             </p>
           )}
 
-          {!searched && !loading && !emptyLibrary && (
-            <p className="py-12 text-center text-sm text-[var(--auth-ink)]/35">
-              Ketik kata kunci. Hasil muncul otomatis, atau tekan Enter.
-            </p>
+          {/* Idle: scan history feed */}
+          {showFeed && (
+            <>
+              <div className="mb-4 flex flex-wrap items-end justify-between gap-2 border-b border-[var(--auth-ink)]/[0.06] pb-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-ink)]/30">
+                    Riwayat scan
+                  </p>
+                  <p className="mt-1 text-sm font-semibold text-[var(--auth-ink)]">
+                    Scan terbaru
+                    {recentTotal > 0 && (
+                      <span className="font-normal text-[var(--auth-ink)]/45">
+                        {" "}
+                        · {shownRecent.toLocaleString("id-ID")}
+                        {recentTotal > shownRecent
+                          ? ` dari ${recentTotal.toLocaleString("id-ID")}`
+                          : ""}{" "}
+                        dokumen
+                      </span>
+                    )}
+                  </p>
+                </div>
+                <p className="text-[11px] text-[var(--auth-ink)]/30">
+                  Terbaru di atas
+                </p>
+              </div>
+
+              {recentError && (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-red-700">
+                  <p>{recentError}</p>
+                  <button
+                    type="button"
+                    onClick={() => void loadRecent(1, false)}
+                    className="text-[12px] font-semibold text-[var(--auth-teal)]"
+                  >
+                    Coba lagi
+                  </button>
+                </div>
+              )}
+
+              {recentLoading && recent.length === 0 && (
+                <p className="flex items-center gap-2 py-8 text-sm text-[var(--auth-ink)]/40">
+                  <Loader2
+                    size={14}
+                    className="animate-spin text-[var(--auth-teal)]"
+                  />
+                  Memuat dokumen terbaru…
+                </p>
+              )}
+
+              {!recentLoading && recent.length === 0 && (
+                <p className="py-12 text-center text-sm text-[var(--auth-ink)]/35">
+                  Belum ada dokumen siap. Ambil PDF dari Library, atau ketik kata
+                  kunci untuk mencari.
+                </p>
+              )}
+
+              {recent.length > 0 && (
+                <ul className="space-y-0">
+                  {recent.map((doc) => (
+                    <li
+                      key={doc.id}
+                      className="border-t border-[var(--auth-ink)]/[0.07] last:border-b"
+                    >
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openPreview(doc.paperlessDocumentId)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openPreview(doc.paperlessDocumentId);
+                          }
+                        }}
+                        className={cn(
+                          "group flex w-full cursor-pointer flex-col gap-1.5 py-4 text-left transition hover:pl-1",
+                          selectedId === doc.paperlessDocumentId && "pl-1"
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <DocPreviewLink
+                            docId={doc.paperlessDocumentId}
+                            className={cn(
+                              "text-[15px] font-semibold leading-snug",
+                              selectedId === doc.paperlessDocumentId
+                                ? "text-[var(--auth-teal-deep)]"
+                                : "text-[var(--auth-ink)] group-hover:text-[var(--auth-teal)]"
+                            )}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {doc.displayName || humanizeFileName(doc.fileName)}
+                          </DocPreviewLink>
+                          <span
+                            className="shrink-0 text-[11px] text-[var(--auth-ink)]/35"
+                            title={formatShortDate(
+                              doc.lastSyncedAt || doc.updatedAt
+                            )}
+                          >
+                            {formatRelativeSync(
+                              doc.lastSyncedAt || doc.updatedAt
+                            )}
+                          </span>
+                        </div>
+                        {doc.remotePath && (
+                          <p className="flex items-start gap-1 text-[11px] text-[var(--auth-ink)]/40">
+                            <FolderOpen
+                              size={11}
+                              className="mt-0.5 shrink-0"
+                            />
+                            <span className="truncate">{doc.remotePath}</span>
+                          </p>
+                        )}
+                        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                          <span className="inline-flex items-center gap-1 text-[var(--auth-teal)]">
+                            <Eye size={11} />
+                            Preview
+                          </span>
+                          <Link
+                            href={askAiHref(doc.paperlessDocumentId)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 font-medium text-[var(--auth-ink)]/45 hover:text-[var(--auth-teal)]"
+                          >
+                            <MessageSquare size={11} />
+                            Tanya Ask AI
+                          </Link>
+                          <a
+                            href={`/api/documents/${doc.paperlessDocumentId}/download`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 text-[var(--auth-ink)]/35 hover:text-[var(--auth-ink)]"
+                          >
+                            <Download size={11} />
+                            Unduh
+                          </a>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
 
-          {loading && results.length === 0 && (
+          {loading && results.length === 0 && searched && (
             <p className="flex items-center gap-2 py-8 text-sm text-[var(--auth-ink)]/40">
-              <Loader2 size={14} className="animate-spin text-[var(--auth-teal)]" />
+              <Loader2
+                size={14}
+                className="animate-spin text-[var(--auth-teal)]"
+              />
               Mencari…
             </p>
           )}
 
           {loading && results.length > 0 && (
             <p className="mb-2 flex items-center gap-2 text-[12px] text-[var(--auth-ink)]/35">
-              <Loader2 size={12} className="animate-spin text-[var(--auth-teal)]" />
+              <Loader2
+                size={12}
+                className="animate-spin text-[var(--auth-teal)]"
+              />
               Memperbarui hasil…
             </p>
           )}
 
           {searched && (!loading || results.length > 0) && (
             <>
-              <p className="mb-3 text-[12px] text-[var(--auth-ink)]/45">
-                {count.toLocaleString("id-ID")}
-                {countIsPartial ? "+" : ""} dokumen
-                {queryUsed ? (
-                  <>
-                    {" "}
-                    untuk &quot;{queryUsed}&quot;
-                  </>
-                ) : null}
-                {folder ? (
-                  <span className="text-[var(--auth-ink)]/35">
-                    {" "}
-                    · folder {folderChipLabel(folder)}
-                  </span>
-                ) : null}
-              </p>
+              {/* Ringkasan hasil */}
+              <div className="mb-5 bg-[var(--auth-teal)]/[0.04] px-4 py-3.5 ring-1 ring-[var(--auth-teal)]/15">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-teal)]/70">
+                  Ringkasan
+                </p>
+                <p className="mt-1 text-sm font-semibold text-[var(--auth-ink)]">
+                  {searchTotalLabel} dokumen
+                  {queryUsed ? (
+                    <>
+                      {" "}
+                      untuk &quot;{queryUsed}&quot;
+                    </>
+                  ) : null}
+                </p>
+                <p className="mt-1 text-[12px] text-[var(--auth-ink)]/45">
+                  Menampilkan {shownSearch.toLocaleString("id-ID")}
+                  {count > shownSearch || countIsPartial
+                    ? ` dari ${searchTotalLabel}`
+                    : ""}{" "}
+                  hasil
+                  {folder ? (
+                    <span>
+                      {" "}
+                      · folder {folderChipLabel(folder)}
+                    </span>
+                  ) : null}
+                </p>
+                {dateRangeLabel && (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-[var(--auth-ink)]/45">
+                    <Calendar size={12} className="shrink-0" />
+                    Tanggal dokumen: {dateRangeLabel}
+                  </p>
+                )}
+                {(summary?.topFolders?.length ?? 0) > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--auth-ink)]/30">
+                      Folder terkait
+                    </span>
+                    {summary!.topFolders.map((f) => (
+                      <button
+                        key={f.path}
+                        type="button"
+                        title={f.path}
+                        onClick={() => {
+                          setFolder(f.path);
+                          scheduleSearch({ folder: f.path });
+                        }}
+                        className={cn(
+                          "text-[12px]",
+                          folder === f.path
+                            ? "font-semibold text-[var(--auth-teal)]"
+                            : "text-[var(--auth-ink)]/50 hover:text-[var(--auth-teal)]"
+                        )}
+                      >
+                        {folderChipLabel(f.path)}
+                        <span className="text-[var(--auth-ink)]/30">
+                          {" "}
+                          ({f.count})
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {results.length === 0 ? (
                 <div className="flex flex-col items-start py-10">
-                  <SearchX className="mb-3 text-[var(--auth-ink)]/25" size={28} />
+                  <SearchX
+                    className="mb-3 text-[var(--auth-ink)]/25"
+                    size={28}
+                  />
                   <p className="auth-display text-lg font-bold text-[var(--auth-ink)]">
                     Tidak ada hasil
                   </p>
                   <p className="mt-2 max-w-md text-sm text-[var(--auth-ink)]/50">
-                    Coba kata lain, matikan &quot;Hanya judul&quot;, ganti folder,
-                    atau tanya langsung di Ask AI.
+                    Coba kata lain, matikan &quot;Hanya judul&quot;, ganti
+                    folder, atau tanya langsung di Ask AI.
                   </p>
                   <Link
                     href="/"
@@ -755,11 +1223,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
                           <span className="inline-flex items-center gap-1 text-[var(--auth-ink)]/35">
                             <Calendar size={10} />
-                            {new Date(doc.created).toLocaleDateString("id-ID", {
-                              day: "numeric",
-                              month: "short",
-                              year: "numeric",
-                            })}
+                            {formatShortDate(doc.created)}
                           </span>
                           <span className="inline-flex items-center gap-1 text-[var(--auth-teal)]">
                             <Eye size={11} />
@@ -787,43 +1251,55 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                   ))}
                 </ul>
               )}
-
-              {hasMore && (
-                <div className="py-6 text-center">
-                  <button
-                    type="button"
-                    disabled={loadingMore}
-                    onClick={() =>
-                      runSearch({
-                        q: query,
-                        folder,
-                        titleOnly,
-                        sort,
-                        from: dateFrom,
-                        to: dateTo,
-                        page: page + 1,
-                        append: true,
-                      })
-                    }
-                    className="text-[12px] font-semibold uppercase tracking-wider text-[var(--auth-teal)] disabled:opacity-40"
-                  >
-                    {loadingMore ? (
-                      <span className="inline-flex items-center gap-2">
-                        <Loader2 size={14} className="animate-spin" />
-                        Memuat…
-                      </span>
-                    ) : (
-                      "Muat lebih banyak"
-                    )}
-                  </button>
-                </div>
-              )}
             </>
           )}
+
+          {/* Load more (manual) */}
+          {((showFeed && recentHasMore) || (searched && hasMore)) && (
+            <div className="flex flex-col items-center gap-2 border-t border-[var(--auth-ink)]/[0.06] py-8">
+              <p className="text-[11px] text-[var(--auth-ink)]/35">
+                {searched
+                  ? `Menampilkan ${shownSearch.toLocaleString("id-ID")} dari ${searchTotalLabel}`
+                  : `Menampilkan ${shownRecent.toLocaleString("id-ID")} dari ${recentTotal.toLocaleString("id-ID")}`}
+              </p>
+              <button
+                type="button"
+                disabled={
+                  searched
+                    ? loadingMore || loading
+                    : recentLoadingMore || recentLoading
+                }
+                onClick={() => loadMore()}
+                className="inline-flex min-h-[40px] min-w-[200px] items-center justify-center gap-2 bg-[var(--auth-teal)] px-5 text-[12px] font-bold uppercase tracking-wider text-white transition hover:bg-[var(--auth-teal-deep)] disabled:opacity-40"
+              >
+                {(searched ? loadingMore : recentLoadingMore) ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Memuat…
+                  </>
+                ) : (
+                  "Muat lebih banyak"
+                )}
+              </button>
+            </div>
+          )}
+          {showFeed && !recentHasMore && recent.length > 0 && !recentLoading && (
+            <p className="py-6 text-center text-[11px] text-[var(--auth-ink)]/30">
+              Semua scan terbaru sudah ditampilkan
+            </p>
+          )}
+          {searched &&
+            !hasMore &&
+            results.length > 0 &&
+            !loading &&
+            !loadingMore && (
+              <p className="py-6 text-center text-[11px] text-[var(--auth-ink)]/30">
+                Semua hasil untuk pencarian ini sudah ditampilkan
+              </p>
+            )}
         </div>
       </section>
 
-      {/* Desktop preview rail */}
       <aside className="hidden w-[min(100%,400px)] shrink-0 flex-col border-l border-[var(--auth-ink)]/[0.08] bg-white/70 backdrop-blur-sm lg:flex">
         {selected ? (
           <>
@@ -869,12 +1345,11 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center text-sm text-[var(--auth-ink)]/35">
             <FileText size={28} className="opacity-40" />
-            <p>Pilih hasil untuk melihat preview di sini.</p>
+            <p>Pilih dokumen untuk melihat preview di sini.</p>
           </div>
         )}
       </aside>
 
-      {/* Mobile preview sheet */}
       {mobilePreview && selected && (
         <div className="fixed inset-0 z-40 lg:hidden">
           <button

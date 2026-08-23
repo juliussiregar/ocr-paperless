@@ -20,6 +20,22 @@ function downloadConcurrency(): number {
   return Math.min(4, Math.max(1, Math.floor(n)));
 }
 
+/** SHA-256 of empty content; never submit these to Paperless OCR. */
+const EMPTY_CONTENT_HASH =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+const EMPTY_FILE_ERROR =
+  "File kosong (0 byte). Tidak bisa di-OCR. Periksa atau ganti file di Cloud Bappenas.";
+
+function isEmptyRemoteSize(size: number | bigint | null | undefined): boolean {
+  if (size == null) return false;
+  return Number(size) === 0;
+}
+
+function isEmptyDownload(size: number, hash: string): boolean {
+  return size === 0 || hash === EMPTY_CONTENT_HASH;
+}
+
 function normalizeFavoritePath(path: string): string {
   if (!path || path === "/") return "/";
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -49,12 +65,17 @@ async function withRetries<T>(
       return await fn();
     } catch (err) {
       if (err instanceof ScanAbortedError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      // Timeouts / empty stubs: retrying only multiplies hang time
+      if (/download timeout|timeout setelah|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(msg)) {
+        throw err;
+      }
       last = err;
       if (i < attempts - 1) {
         const waitMs = 1000 * (i + 1);
         console.warn(
           `[retry] ${label} attempt ${i + 1}/${attempts} failed, wait ${waitMs}ms:`,
-          err instanceof Error ? err.message : err
+          msg
         );
         await new Promise((r) => setTimeout(r, waitMs));
       }
@@ -87,7 +108,7 @@ function hasFileChanged(
     lastModified: Date | null;
     fileSize: bigint | null;
   },
-  remote: { etag: string | null; lastModified: Date | null; size: number }
+  remote: { etag: string | null; lastModified: Date | null; size: number | null }
 ): boolean {
   if (existing.etag && remote.etag && existing.etag !== remote.etag) {
     return true;
@@ -99,7 +120,11 @@ function hasFileChanged(
   ) {
     return true;
   }
-  if (existing.fileSize !== null && BigInt(remote.size) !== existing.fileSize) {
+  if (
+    existing.fileSize !== null &&
+    remote.size != null &&
+    BigInt(remote.size) !== existing.fileSize
+  ) {
     return true;
   }
   return false;
@@ -618,6 +643,25 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
         return;
       }
 
+      if (isEmptyDownload(downloaded.size, hash)) {
+        await discardTemp(tempPath);
+        tempPath = null;
+        await prisma.syncFile.update({
+          where: { userId_remotePath: { userId, remotePath } },
+          data: {
+            contentHash: hash,
+            fileSize: BigInt(0),
+            syncStatus: SyncStatus.FAILED,
+            errorMessage: EMPTY_FILE_ERROR,
+            ocrPendingAt: null,
+          },
+        });
+        failed++;
+        processed++;
+        await bumpJobProgress();
+        return;
+      }
+
       const duplicateByHash = await prisma.syncFile.findFirst({
         where: {
           contentHash: hash,
@@ -1013,6 +1057,40 @@ async function runFullScanJob(jobId: string): Promise<void> {
           continue;
         }
 
+        // Skip known-empty remote stubs before download (avoids hung WebDAV streams)
+        if (isEmptyRemoteSize(remote.size)) {
+          await prisma.syncFile.upsert({
+            where: {
+              userId_remotePath: { userId, remotePath: remote.path },
+            },
+            create: {
+              userId,
+              remotePath: remote.path,
+              fileName: remote.basename,
+              etag: remote.etag,
+              lastModified: remote.lastModified,
+              fileSize: BigInt(0),
+              mimeType: remote.mimeType,
+              syncStatus: SyncStatus.FAILED,
+              errorMessage: EMPTY_FILE_ERROR,
+            },
+            update: {
+              etag: remote.etag,
+              lastModified: remote.lastModified,
+              fileSize: BigInt(0),
+              syncStatus: SyncStatus.FAILED,
+              errorMessage: EMPTY_FILE_ERROR,
+              ocrPendingAt: null,
+            },
+          });
+          failed++;
+          await prisma.scanJob.update({
+            where: { id: jobId },
+            data: { processedFiles: ++processed, failedFiles: failed },
+          });
+          continue;
+        }
+
         await prisma.syncFile.upsert({
           where: {
             userId_remotePath: { userId, remotePath: remote.path },
@@ -1023,14 +1101,14 @@ async function runFullScanJob(jobId: string): Promise<void> {
             fileName: remote.basename,
             etag: remote.etag,
             lastModified: remote.lastModified,
-            fileSize: BigInt(remote.size),
+            fileSize: remote.size != null ? BigInt(remote.size) : null,
             mimeType: remote.mimeType,
             syncStatus: SyncStatus.DOWNLOADING,
           },
           update: {
             etag: remote.etag,
             lastModified: remote.lastModified,
-            fileSize: BigInt(remote.size),
+            ...(remote.size != null ? { fileSize: BigInt(remote.size) } : {}),
             syncStatus: SyncStatus.DOWNLOADING,
             errorMessage: null,
           },
@@ -1055,6 +1133,28 @@ async function runFullScanJob(jobId: string): Promise<void> {
         }
         const tempPath = downloaded.tempPath;
         const hash = downloaded.hash;
+
+        if (isEmptyDownload(downloaded.size, hash)) {
+          await discardTemp(tempPath);
+          await prisma.syncFile.update({
+            where: {
+              userId_remotePath: { userId, remotePath: remote.path },
+            },
+            data: {
+              contentHash: hash,
+              fileSize: BigInt(0),
+              syncStatus: SyncStatus.FAILED,
+              errorMessage: EMPTY_FILE_ERROR,
+              ocrPendingAt: null,
+            },
+          });
+          failed++;
+          await prisma.scanJob.update({
+            where: { id: jobId },
+            data: { processedFiles: ++processed, failedFiles: failed },
+          });
+          continue;
+        }
 
         // Dedup OCR: reuse Paperless doc if any user already OCR'd this hash
         const duplicateByHash = await prisma.syncFile.findFirst({
@@ -1236,6 +1336,24 @@ export async function reconcileOcrStatus(): Promise<{
 
   for (const file of pending) {
     const pendingSince = file.ocrPendingAt ?? file.updatedAt;
+
+    // Empty stubs never become valid Paperless docs
+    if (
+      isEmptyRemoteSize(file.fileSize) ||
+      file.contentHash === EMPTY_CONTENT_HASH
+    ) {
+      await prisma.syncFile.update({
+        where: { id: file.id },
+        data: {
+          syncStatus: SyncStatus.FAILED,
+          errorMessage: EMPTY_FILE_ERROR,
+          ocrPendingAt: null,
+        },
+      });
+      // Counted as failed empty stub, not OCR timeout
+      continue;
+    }
+
     if (PAPERLESS_TOKEN && file.contentHash) {
       const docId = await findPaperlessDocumentByChecksum(file.contentHash);
       if (docId) {

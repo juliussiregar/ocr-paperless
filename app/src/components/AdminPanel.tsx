@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { PasswordInput } from "@/components/ui/PasswordInput";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/Toast";
+import { AdminAuditPanel } from "@/components/AdminAuditPanel";
 
 interface AutoScanSettings {
   autoScanEnabled: boolean;
@@ -104,6 +105,8 @@ export function AdminPanel({ initialUsers, initialSettings }: AdminPanelProps) {
 
   return (
     <div className="space-y-6">
+      <AdminAuditPanel />
+
       <Card className="!p-0 overflow-hidden">
         <div className="border-b border-slate-100 px-6 py-4">
           <div className="flex items-center gap-3">

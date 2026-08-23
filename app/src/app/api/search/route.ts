@@ -8,8 +8,9 @@ import {
   type PaperlessDocument,
 } from "@/lib/paperless";
 import { humanizeFileName } from "@/lib/display-name";
+import { writeAudit } from "@/lib/audit";
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 20;
 const MAX_PAPERLESS_PAGES = 16;
 const ID_IN_BATCH = 80;
 
@@ -27,6 +28,56 @@ function paperlessOrdering(sort: SortKey): string | undefined {
       // Omit ordering so Whoosh keeps relevance for full-text query
       return undefined;
   }
+}
+
+function parentFolder(remotePath: string | null | undefined): string | null {
+  if (!remotePath) return null;
+  const parts = remotePath.split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  return "/" + parts.slice(0, -1).join("/");
+}
+
+function buildSearchSummary(
+  matched: PaperlessDocument[],
+  pathByDoc: Map<number, { remotePath: string; fileName: string }>,
+  count: number,
+  countIsPartial: boolean
+): {
+  total: number;
+  countIsPartial: boolean;
+  topFolders: { path: string; count: number }[];
+  oldestCreated: string | null;
+  newestCreated: string | null;
+} {
+  const folderCounts = new Map<string, number>();
+  let oldest: number | null = null;
+  let newest: number | null = null;
+
+  for (const d of matched) {
+    const meta = pathByDoc.get(d.id);
+    const folder = parentFolder(meta?.remotePath);
+    if (folder) {
+      folderCounts.set(folder, (folderCounts.get(folder) ?? 0) + 1);
+    }
+    const t = new Date(d.created).getTime();
+    if (Number.isFinite(t)) {
+      if (oldest == null || t < oldest) oldest = t;
+      if (newest == null || t > newest) newest = t;
+    }
+  }
+
+  const topFolders = [...folderCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "id"))
+    .slice(0, 5)
+    .map(([path, c]) => ({ path, count: c }));
+
+  return {
+    total: count,
+    countIsPartial,
+    topFolders,
+    oldestCreated: oldest != null ? new Date(oldest).toISOString() : null,
+    newestCreated: newest != null ? new Date(newest).toISOString() : null,
+  };
 }
 
 function inDateRange(d: PaperlessDocument, from: string, to: string): boolean {
@@ -145,6 +196,7 @@ export async function GET(request: NextRequest) {
       querySanitized: false,
       results: [],
       folders,
+      summary: null,
     });
   }
 
@@ -195,6 +247,13 @@ export async function GET(request: NextRequest) {
         querySanitized: cleaned !== rawQ.trim(),
         results: [],
         folders,
+        summary: {
+          total: 0,
+          countIsPartial: false,
+          topFolders: [],
+          oldestCreated: null,
+          newestCreated: null,
+        },
       });
     }
 
@@ -308,6 +367,12 @@ export async function GET(request: NextRequest) {
     const start = (page - 1) * PAGE_SIZE;
     const slice = matched.slice(start, start + PAGE_SIZE);
     const hasMore = start + PAGE_SIZE < count || countIsPartial;
+    const summary = buildSearchSummary(
+      matched,
+      pathByDoc,
+      count,
+      countIsPartial
+    );
 
     const results = slice.map((d) => {
       const meta = pathByDoc.get(d.id);
@@ -325,6 +390,16 @@ export async function GET(request: NextRequest) {
       };
     });
 
+    if (page === 1) {
+      void writeAudit("search.query", userId, {
+        q: cleaned.slice(0, 120),
+        count,
+        countIsPartial,
+        folder: folder || null,
+        titleOnly,
+      });
+    }
+
     return NextResponse.json({
       count,
       countIsPartial,
@@ -335,9 +410,14 @@ export async function GET(request: NextRequest) {
       querySanitized: cleaned !== rawQ.trim(),
       results,
       folders,
+      summary,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Search failed";
+    void writeAudit("error.search", session.user.id, {
+      q: cleaned.slice(0, 120),
+      error: message.slice(0, 500),
+    });
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

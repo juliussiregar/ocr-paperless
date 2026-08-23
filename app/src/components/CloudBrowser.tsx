@@ -402,7 +402,7 @@ function CloudBrowserInner() {
 
   const loadRecent = useCallback(async () => {
     try {
-      const res = await fetch("/api/cloud/recent");
+      const res = await fetch("/api/cloud/recent?limit=5");
       if (!res.ok) return;
       const data = await res.json();
       setRecent(data.files ?? []);
@@ -670,16 +670,51 @@ function CloudBrowserInner() {
       const res = await fetch("/api/scan");
       if (!res.ok || cancelled) return;
       const data = await res.json();
-      const latest = data.latestJob;
+      const active = data.activeJob ?? data.latestJob;
       if (
-        latest &&
-        (latest.status === "RUNNING" ||
-          latest.status === "PENDING" ||
-          latest.status === "PAUSED")
+        !active ||
+        (active.status !== "RUNNING" &&
+          active.status !== "PENDING" &&
+          active.status !== "PAUSED")
       ) {
-        setIngestJobId(latest.id);
-        setIngesting(true);
+        return;
       }
+      // Seed progress immediately so Stop/Pause stay visible after refresh
+      // (poll fills details a moment later).
+      setIngestJobId(active.id);
+      setIngesting(true);
+      setCancelling(false);
+      setIngestProgress({
+        status: active.status,
+        phase: active.phase ?? "running",
+        phaseTitle:
+          active.status === "PAUSED"
+            ? "Scan dijeda"
+            : active.status === "PENDING"
+              ? "Menunggu antrean…"
+              : "Scan masih berjalan…",
+        phaseDetail: active.currentFile
+          ? `File: ${active.currentFile}`
+          : "Memulihkan progress setelah refresh. Tombol Stop tersedia.",
+        progressPercent:
+          active.totalFiles > 0
+            ? Math.round(
+                (active.processedFiles / active.totalFiles) * 100
+              )
+            : null,
+        processedFiles: active.processedFiles ?? 0,
+        totalFiles: active.totalFiles ?? 0,
+        failedFiles: active.failedFiles ?? 0,
+        newFiles: active.newFiles ?? 0,
+        skippedFiles: active.skippedFiles ?? 0,
+        currentFile: active.currentFile ?? null,
+        ocrPendingCount: 0,
+        ocrDoneCount: 0,
+        ocrTotalCount: 0,
+        ocrProgressPercent: null,
+        errorMessage: active.errorMessage ?? null,
+        etaSeconds: null,
+      });
     })();
     return () => {
       cancelled = true;
@@ -821,7 +856,7 @@ function CloudBrowserInner() {
             : folderPath.replace(/\/$/, "") || "/";
         const prefix = normalized === "/" ? null : `${normalized}/`;
 
-        const readyDocs = (await fetch("/api/cloud/recent")
+        const readyDocs = (await fetch("/api/cloud/recent?limit=5")
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null)) as { files?: RecentFile[] } | null;
 

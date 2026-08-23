@@ -125,6 +125,16 @@ export function humanizeSyncError(raw: string | null | undefined): {
       hint: "Paperless belum selesai dalam batas waktu. Tekan Coba OCR lagi.",
     };
   }
+  if (
+    lower.includes("kosong") ||
+    lower.includes("0 byte") ||
+    lower.includes("0b")
+  ) {
+    return {
+      title: "File kosong (0 B)",
+      hint: "File di Cloud tidak berisi data. Ganti/unggah ulang di Bappenas, lalu scan lagi.",
+    };
+  }
   if (lower.includes("macet") || lower.includes("stuck")) {
     return {
       title: "Proses macet",

@@ -149,10 +149,23 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      const u = result.usage;
+      const chatHits = u?.chatHits ?? 0;
+      const embeddingHits = u?.embeddingHits ?? 0;
+      const usedOpenAi = chatHits > 0 || embeddingHits > 0;
       await writeAudit("chat.ask", userId, {
         question: question.slice(0, 200),
         citations: result.citations.length,
         conversationId: conversation.id,
+        openai: usedOpenAi,
+        model: u?.model,
+        promptTokens: u?.promptTokens ?? 0,
+        completionTokens: u?.completionTokens ?? 0,
+        totalTokens: u?.totalTokens ?? 0,
+        embeddingTokens: u?.embeddingTokens ?? 0,
+        embeddingHits,
+        chatHits,
+        estimatedCostUsd: u?.estimatedCostUsd ?? 0,
       });
 
       return NextResponse.json({
@@ -164,6 +177,11 @@ export async function POST(request: NextRequest) {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Chat failed";
+      await writeAudit("error.chat", userId, {
+        question: question.slice(0, 200),
+        conversationId: conversation.id,
+        error: message.slice(0, 500),
+      });
       return NextResponse.json({ error: message }, { status: 502 });
     }
   }
@@ -231,10 +249,23 @@ export async function POST(request: NextRequest) {
           },
         });
 
+        const u = result.usage;
+        const chatHits = u?.chatHits ?? 0;
+        const embeddingHits = u?.embeddingHits ?? 0;
+        const usedOpenAi = chatHits > 0 || embeddingHits > 0;
         await writeAudit("chat.ask", userId, {
           question: question.slice(0, 200),
           citations: citations.length,
           conversationId: conversation!.id,
+          openai: usedOpenAi,
+          model: u?.model,
+          promptTokens: u?.promptTokens ?? 0,
+          completionTokens: u?.completionTokens ?? 0,
+          totalTokens: u?.totalTokens ?? 0,
+          embeddingTokens: u?.embeddingTokens ?? 0,
+          embeddingHits,
+          chatHits,
+          estimatedCostUsd: u?.estimatedCostUsd ?? 0,
         });
 
         send({
@@ -244,6 +275,11 @@ export async function POST(request: NextRequest) {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Chat failed";
+        await writeAudit("error.chat", userId, {
+          question: question.slice(0, 200),
+          conversationId: conversation!.id,
+          error: message.slice(0, 500),
+        });
         send({ type: "error", error: message });
       } finally {
         controller.close();

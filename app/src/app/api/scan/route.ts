@@ -106,10 +106,14 @@ export async function GET(request: NextRequest) {
     )
   );
 
-  const [latest, stats, user, failedFiles, processingFiles, failedTotal, processingTotal] =
+  const [latest, active, stats, user, failedFiles, processingFiles, failedTotal, processingTotal] =
     await Promise.all([
       prisma.scanJob.findFirst({
         where: { triggeredById: userId },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.scanJob.findFirst({
+        where: activeScanJobWhere(userId),
         orderBy: { createdAt: "desc" },
       }),
       prisma.syncFile.groupBy({
@@ -162,6 +166,7 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     latestJob: latest,
+    activeJob: active,
     syncStats: stats,
     lastSyncAt: user?.lastSyncAt ?? null,
     lastDiscoveryAt: user?.lastDiscoveryAt ?? null,

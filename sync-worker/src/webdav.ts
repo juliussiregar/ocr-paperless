@@ -10,7 +10,8 @@ export interface RemoteFile {
   basename: string;
   etag: string | null;
   lastModified: Date | null;
-  size: number;
+  /** null when WebDAV omitted size (do not treat as empty). */
+  size: number | null;
   mimeType: string | null;
 }
 
@@ -52,7 +53,7 @@ function toRemoteFile(item: FileStat): RemoteFile {
     basename: item.basename,
     etag: normalizeEtag(item.etag),
     lastModified: item.lastmod ? new Date(item.lastmod) : null,
-    size: typeof item.size === "number" ? item.size : 0,
+    size: typeof item.size === "number" && Number.isFinite(item.size) ? item.size : null,
     mimeType: item.mime ?? PDF_MIME,
   };
 }
@@ -407,6 +408,7 @@ export function createWebDavClient(
   /**
    * Stream download to a temp file while hashing (avoids holding two full copies).
    * AbortSignal destroys the stream mid-transfer on cancel.
+   * Also aborts after WEBDAV_DOWNLOAD_TIMEOUT_MS so empty/hung streams don't stall the scan.
    */
   async function downloadToTemp(
     remotePath: string,
@@ -420,8 +422,35 @@ export function createWebDavClient(
     const hash = createHash("sha256");
     let size = 0;
 
-    const signal = opts?.signal;
-    if (signal?.aborted) throw new ScanAbortedError();
+    const timeoutMs = Number(process.env.WEBDAV_DOWNLOAD_TIMEOUT_MS ?? 120_000);
+    const timeoutSignal =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? AbortSignal.timeout(timeoutMs)
+        : null;
+    const signals = [opts?.signal, timeoutSignal].filter(
+      (s): s is AbortSignal => !!s
+    );
+    const signal =
+      signals.length === 0
+        ? undefined
+        : signals.length === 1
+          ? signals[0]
+          : AbortSignal.any(signals);
+
+    if (signal?.aborted) {
+      const reason = signal.reason;
+      if (
+        reason &&
+        typeof reason === "object" &&
+        "name" in reason &&
+        (reason as { name?: string }).name === "TimeoutError"
+      ) {
+        throw new Error(
+          `Download timeout setelah ${Math.round(timeoutMs / 1000)}s (${remotePath})`
+        );
+      }
+      throw new ScanAbortedError();
+    }
 
     const raw = client.createReadStream(remotePath);
     const nodeStream =
@@ -429,38 +458,62 @@ export function createWebDavClient(
         ? raw
         : Readable.fromWeb(raw as unknown as import("stream/web").ReadableStream);
 
-    await new Promise<void>((resolve, reject) => {
-      const onAbort = () => {
-        nodeStream.destroy(new ScanAbortedError());
-      };
-      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          const reason = signal?.reason;
+          const timedOut =
+            reason &&
+            typeof reason === "object" &&
+            "name" in reason &&
+            (reason as { name?: string }).name === "TimeoutError";
+          nodeStream.destroy(
+            timedOut
+              ? new Error(
+                  `Download timeout setelah ${Math.round(timeoutMs / 1000)}s (${remotePath})`
+                )
+              : new ScanAbortedError()
+          );
+        };
+        if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
-      const out = createWriteStream(tempPath);
-      nodeStream.on("data", (chunk: Buffer | string) => {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        hash.update(buf);
-        size += buf.length;
+        const out = createWriteStream(tempPath);
+        nodeStream.on("data", (chunk: Buffer | string) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          hash.update(buf);
+          size += buf.length;
+        });
+        nodeStream.on("error", (err) => {
+          if (signal) signal.removeEventListener("abort", onAbort);
+          out.destroy();
+          reject(
+            err?.name === "ScanAbortedError" ||
+              (signal?.aborted &&
+                !(
+                  signal.reason &&
+                  typeof signal.reason === "object" &&
+                  "name" in signal.reason &&
+                  (signal.reason as { name?: string }).name === "TimeoutError"
+                ))
+              ? new ScanAbortedError()
+              : err
+          );
+        });
+        out.on("error", (err) => {
+          if (signal) signal.removeEventListener("abort", onAbort);
+          nodeStream.destroy();
+          reject(err);
+        });
+        out.on("finish", () => {
+          if (signal) signal.removeEventListener("abort", onAbort);
+          resolve();
+        });
+        nodeStream.pipe(out);
       });
-      nodeStream.on("error", (err) => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        out.destroy();
-        reject(
-          err?.name === "ScanAbortedError" || signal?.aborted
-            ? new ScanAbortedError()
-            : err
-        );
-      });
-      out.on("error", (err) => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        nodeStream.destroy();
-        reject(err);
-      });
-      out.on("finish", () => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        resolve();
-      });
-      nodeStream.pipe(out);
-    });
+    } catch (err) {
+      await unlink(tempPath).catch(() => {});
+      throw err;
+    }
 
     return { tempPath, hash: hash.digest("hex"), size };
   }
