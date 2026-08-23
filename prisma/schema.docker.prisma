@@ -2,9 +2,8 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// App and sync-worker each have their own node_modules/@prisma/client;
-// generate into those trees so Next/worker never load a stale root client.
-
+// Docker builds (app + sync-worker): single default client into local node_modules.
+// Keep models in sync with schema.prisma (without multi-output generators).
 
 datasource db {
   provider = "postgresql"
@@ -54,17 +53,20 @@ model User {
   audits    AuditLog[]
   chats     ChatConversation[]
   favorites CloudFavorite[]
+  chunks    DocumentChunk[]
 
   @@map("users")
 }
 
 model CloudFavorite {
-  id           String   @id @default(cuid())
-  userId       String   @map("user_id")
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String    @id @default(cuid())
+  userId       String    @map("user_id")
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   path         String
-  lastOpenedAt DateTime @default(now()) @map("last_opened_at")
-  createdAt    DateTime @default(now()) @map("created_at")
+  lastOpenedAt DateTime  @default(now()) @map("last_opened_at")
+  /// Last successful newest-ingest for this favorite (delta "new since")
+  lastSyncedAt DateTime? @map("last_synced_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
 
   @@unique([userId, path])
   @@index([userId])
@@ -86,9 +88,13 @@ model SyncFile {
   syncStatus          SyncStatus @default(DISCOVERED) @map("sync_status")
   paperlessDocumentId Int?       @map("paperless_document_id")
   errorMessage        String?    @map("error_message")
+  /// When file entered OCR_PENDING (for UI age / timeout messaging)
+  ocrPendingAt        DateTime?  @map("ocr_pending_at")
   lastSyncedAt        DateTime?  @map("last_synced_at")
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
+
+  chunks DocumentChunk[]
 
   @@unique([userId, remotePath])
   @@index([userId])
@@ -97,6 +103,29 @@ model SyncFile {
   @@index([etag])
   @@index([paperlessDocumentId])
   @@map("sync_files")
+}
+
+/// OCR text chunks + embeddings for hybrid Ask retrieval
+model DocumentChunk {
+  id                  String   @id @default(cuid())
+  userId              String   @map("user_id")
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  syncFileId          String   @map("sync_file_id")
+  syncFile            SyncFile @relation(fields: [syncFileId], references: [id], onDelete: Cascade)
+  paperlessDocumentId Int      @map("paperless_document_id")
+  chunkIndex          Int      @map("chunk_index")
+  content             String
+  /// float[] embedding from OPENAI_EMBEDDING_MODEL
+  embedding           Json
+  tokenEstimate       Int      @default(0) @map("token_estimate")
+  contentHash         String   @map("content_hash")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, paperlessDocumentId, chunkIndex])
+  @@index([userId, paperlessDocumentId])
+  @@index([syncFileId])
+  @@map("document_chunks")
 }
 
 model ScanJob {
