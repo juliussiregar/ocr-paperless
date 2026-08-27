@@ -12,6 +12,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Folder,
+  FolderOpen,
   FileText,
   ChevronRight,
   Loader2,
@@ -32,6 +33,7 @@ import {
   X,
   Search,
   RotateCcw,
+  Minus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/Toast";
@@ -387,6 +389,201 @@ function FolderMetaLine({
           Arahkan untuk info cloud
         </p>
       ) : null}
+    </div>
+  );
+}
+
+type FolderVisualState =
+  | "loading"
+  | "empty"
+  | "unknown"
+  | "cloud_only"
+  | "pending"
+  | "processing"
+  | "partial"
+  | "ready"
+  | "issue";
+
+function resolveFolderVisualState(
+  stats: FolderStats | null,
+  cloudHint: CloudFolderHint | null,
+  loading?: boolean
+): FolderVisualState {
+  if (loading) return "loading";
+  if (cloudHint?.isEmpty) return "empty";
+
+  const hasIssue =
+    (stats?.failedCount ?? 0) > 0 ||
+    (stats?.zeroByteCount ?? 0) > 0 ||
+    (cloudHint?.zeroBytePdfs ?? 0) > 0;
+  if (hasIssue) return "issue";
+
+  if (stats && stats.pdfCount > 0) {
+    if (stats.processingCount > 0) return "processing";
+    if (stats.scannedCount >= stats.pdfCount) return "ready";
+    if (stats.scannedCount > 0) return "partial";
+    if (stats.pendingCount > 0) return "pending";
+  }
+
+  if (cloudHint && cloudHint.pdfCount > 0) return "cloud_only";
+  if (cloudHint && (cloudHint.dirCount > 0 || cloudHint.fileCount > 0)) {
+    return "cloud_only";
+  }
+  return "unknown";
+}
+
+const FOLDER_VISUAL: Record<
+  FolderVisualState,
+  {
+    iconClass: string;
+    wrapClass: string;
+    label: string;
+    Icon: typeof Folder;
+  }
+> = {
+  loading: {
+    iconClass: "text-[var(--auth-ink)]/35",
+    wrapClass: "bg-[var(--auth-ink)]/[0.04]",
+    label: "Memuat info folder",
+    Icon: Folder,
+  },
+  empty: {
+    iconClass: "text-[var(--auth-ink)]/30",
+    wrapClass: "bg-[var(--auth-ink)]/[0.04] ring-1 ring-[var(--auth-ink)]/10",
+    label: "Folder kosong",
+    Icon: FolderOpen,
+  },
+  unknown: {
+    iconClass: "text-amber-500",
+    wrapClass: "bg-amber-50/70",
+    label: "Folder (arahkan untuk info cloud)",
+    Icon: Folder,
+  },
+  cloud_only: {
+    iconClass: "text-sky-600",
+    wrapClass: "bg-sky-50 ring-1 ring-sky-200/70",
+    label: "Ada isi di cloud, belum / sedikit tercatat di sistem",
+    Icon: Folder,
+  },
+  pending: {
+    iconClass: "text-amber-600",
+    wrapClass: "bg-amber-50 ring-1 ring-amber-200/80",
+    label: "Ada PDF belum discan",
+    Icon: Folder,
+  },
+  processing: {
+    iconClass: "text-sky-700",
+    wrapClass: "bg-sky-50 ring-1 ring-sky-200/80",
+    label: "Ada PDF sedang diproses",
+    Icon: Folder,
+  },
+  partial: {
+    iconClass: "text-[var(--auth-teal)]",
+    wrapClass: "bg-[var(--auth-teal)]/10 ring-1 ring-[var(--auth-teal)]/25",
+    label: "Sebagian PDF sudah siap",
+    Icon: Folder,
+  },
+  ready: {
+    iconClass: "text-[var(--auth-teal)]",
+    wrapClass: "bg-[var(--auth-teal)]/15 ring-1 ring-[var(--auth-teal)]/35",
+    label: "Semua PDF tercatat sudah siap",
+    Icon: Folder,
+  },
+  issue: {
+    iconClass: "text-amber-700",
+    wrapClass: "bg-amber-100/80 ring-1 ring-amber-300/80",
+    label: "Ada file gagal atau 0 B",
+    Icon: Folder,
+  },
+};
+
+function FolderStateIcon({
+  stats,
+  cloudHint,
+  loading,
+}: {
+  stats: FolderStats | null;
+  cloudHint: CloudFolderHint | null;
+  loading?: boolean;
+}) {
+  const state = resolveFolderVisualState(stats, cloudHint, loading);
+  const visual = FOLDER_VISUAL[state];
+  const Icon = visual.Icon;
+
+  return (
+    <div
+      className={cn(
+        "relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
+        visual.wrapClass,
+        visual.iconClass
+      )}
+      title={visual.label}
+    >
+      <Icon size={18} strokeWidth={2} />
+      <span
+        className={cn(
+          "absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full border border-white shadow-sm",
+          state === "ready" && "bg-[var(--auth-teal)] text-white",
+          state === "partial" && "bg-[var(--auth-teal)]/80 text-white",
+          state === "pending" && "bg-amber-500 text-white",
+          state === "processing" && "bg-sky-600 text-white",
+          state === "issue" && "bg-amber-600 text-white",
+          state === "empty" && "bg-[var(--auth-ink)]/35 text-white",
+          state === "cloud_only" && "bg-sky-500 text-white",
+          state === "loading" && "bg-white text-[var(--auth-ink)]/50",
+          state === "unknown" && "bg-amber-400/90 text-white"
+        )}
+        aria-hidden
+      >
+        {state === "loading" || state === "processing" ? (
+          <Loader2 size={8} className="animate-spin" />
+        ) : state === "ready" ? (
+          <CheckCircle2 size={8} strokeWidth={3} />
+        ) : state === "partial" ? (
+          <span className="text-[7px] font-bold leading-none">½</span>
+        ) : state === "pending" ? (
+          <Clock size={8} strokeWidth={3} />
+        ) : state === "issue" ? (
+          <AlertCircle size={8} strokeWidth={3} />
+        ) : state === "empty" ? (
+          <Minus size={8} strokeWidth={3} />
+        ) : state === "cloud_only" ? (
+          <Inbox size={8} strokeWidth={3} />
+        ) : (
+          <span className="h-1 w-1 rounded-full bg-white" />
+        )}
+      </span>
+    </div>
+  );
+}
+
+function FolderIconLegend() {
+  const items: { state: FolderVisualState; short: string }[] = [
+    { state: "empty", short: "Kosong" },
+    { state: "cloud_only", short: "Ada isi" },
+    { state: "pending", short: "Belum scan" },
+    { state: "processing", short: "Proses" },
+    { state: "partial", short: "Sebagian" },
+    { state: "ready", short: "Siap" },
+    { state: "issue", short: "Gagal / 0 B" },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--auth-ink)]/45">
+      <span className="font-semibold uppercase tracking-[0.12em] text-[var(--auth-ink)]/30">
+        Ikon folder
+      </span>
+      {items.map(({ state, short }) => {
+        const v = FOLDER_VISUAL[state];
+        const Icon = v.Icon;
+        return (
+          <span key={state} className="inline-flex items-center gap-1" title={v.label}>
+            <span className={cn("inline-flex", v.iconClass)}>
+              <Icon size={12} />
+            </span>
+            {short}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -2079,6 +2276,10 @@ function CloudBrowserInner() {
               )}
             </div>
 
+            <div className="mt-2">
+              <FolderIconLegend />
+            </div>
+
             {showProgressPanel && ingestProgress && (
               <div className="space-y-2 border-t border-[var(--auth-teal)]/20 pt-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -2317,9 +2518,14 @@ function CloudBrowserInner() {
                           onMouseEnter={() => scheduleCloudHint(item.path)}
                           onFocus={() => scheduleCloudHint(item.path)}
                         >
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center text-amber-600">
-                            <Folder size={18} />
-                          </div>
+                          <FolderStateIcon
+                            stats={item.folderStats}
+                            cloudHint={
+                              cloudHintCache.current.get(item.path) ??
+                              item.cloudHint
+                            }
+                            loading={cloudHintLoadingPaths.has(item.path)}
+                          />
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-sm font-medium text-[var(--auth-ink)]">
                               {display}
