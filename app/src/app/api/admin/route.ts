@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
-import { encrypt } from "@/lib/crypto";
+import { encrypt, decrypt } from "@/lib/crypto";
 import { writeAudit } from "@/lib/audit";
 import bcrypt from "bcryptjs";
 import { Role } from "@prisma/client";
@@ -114,6 +114,141 @@ export async function POST(request: NextRequest) {
     await writeAudit("user.create", session!.user.id, { email });
 
     return NextResponse.json({ user });
+  }
+
+  if (action === "updateUser") {
+    const {
+      id,
+      email,
+      name,
+      password,
+      role,
+      bappenasUsername,
+      bappenasPassword,
+      bappenasUrl,
+    } = body;
+
+    if (!id || typeof id !== "string") {
+      return NextResponse.json({ error: "ID user wajib" }, { status: 400 });
+    }
+
+    const existing = await prisma.user.findUnique({ where: { id } });
+    if (!existing) {
+      return NextResponse.json({ error: "User tidak ditemukan" }, { status: 404 });
+    }
+
+    const data: {
+      email?: string;
+      name?: string;
+      role?: Role;
+      passwordHash?: string;
+      bappenasUrl?: string;
+      encryptedBappenasUsername?: string;
+      encryptedBappenasPassword?: string;
+    } = {};
+
+    if (name && String(name).trim().length >= 2) {
+      data.name = String(name).trim();
+    }
+
+    if (email) {
+      const normalized = String(email).toLowerCase().trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+        return NextResponse.json({ error: "Email tidak valid" }, { status: 400 });
+      }
+      if (normalized !== existing.email) {
+        const dup = await prisma.user.findUnique({ where: { email: normalized } });
+        if (dup) {
+          return NextResponse.json(
+            { error: "Email sudah dipakai user lain" },
+            { status: 409 }
+          );
+        }
+        data.email = normalized;
+      }
+    }
+
+    if (role === "ADMIN" || role === "USER") {
+      const nextRole = role === "ADMIN" ? Role.ADMIN : Role.USER;
+      if (existing.role === Role.ADMIN && nextRole === Role.USER) {
+        const adminCount = await prisma.user.count({
+          where: { role: Role.ADMIN },
+        });
+        if (adminCount <= 1) {
+          return NextResponse.json(
+            { error: "Tidak bisa menurunkan admin terakhir" },
+            { status: 400 }
+          );
+        }
+      }
+      data.role = nextRole;
+    }
+
+    if (password && String(password).length > 0) {
+      if (String(password).length < 8) {
+        return NextResponse.json(
+          { error: "Password minimal 8 karakter" },
+          { status: 400 }
+        );
+      }
+      data.passwordHash = await bcrypt.hash(String(password), 12);
+    }
+
+    if (bappenasUrl && String(bappenasUrl).trim()) {
+      data.bappenasUrl = String(bappenasUrl).trim();
+    }
+
+    if (bappenasUsername && bappenasPassword) {
+      data.encryptedBappenasUsername = encrypt(String(bappenasUsername).trim());
+      data.encryptedBappenasPassword = encrypt(String(bappenasPassword));
+    } else if (bappenasUsername || bappenasPassword) {
+      return NextResponse.json(
+        {
+          error:
+            "Untuk update kredensial Bappenas, isi username dan password sekaligus",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (Object.keys(data).length === 0) {
+      return NextResponse.json({ error: "Tidak ada perubahan" }, { status: 400 });
+    }
+
+    const user = await prisma.user.update({
+      where: { id },
+      data,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        encryptedBappenasUsername: true,
+      },
+    });
+
+    let hasBappenasCreds = false;
+    try {
+      const u = decrypt(user.encryptedBappenasUsername);
+      hasBappenasCreds = !!u && u !== "admin-placeholder";
+    } catch {
+      hasBappenasCreds = false;
+    }
+
+    await writeAudit("user.update", session!.user.id, {
+      targetUserId: id,
+      fields: Object.keys(data),
+    });
+
+    return NextResponse.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        hasBappenasCreds,
+      },
+    });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });

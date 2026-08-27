@@ -5,7 +5,7 @@ import { SyncStatus } from "@prisma/client";
 import { humanizeFileName } from "@/lib/display-name";
 
 const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 50;
+const MAX_LIMIT = 100;
 
 /** File terbaru yang sudah berhasil di-OCR (paginated). */
 export async function GET(request: NextRequest) {

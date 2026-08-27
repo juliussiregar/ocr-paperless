@@ -32,6 +32,9 @@ export function Nav({ user }: NavProps) {
 
   function isActive(href: string) {
     if (href === "/") return pathname === "/" || pathname === "/ask";
+    if (href === "/admin") {
+      return pathname === "/admin" || pathname.startsWith("/admin/");
+    }
     return pathname === href || pathname.startsWith(`${href}/`);
   }
 

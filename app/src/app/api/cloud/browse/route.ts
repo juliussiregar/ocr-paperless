@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getUserBappenasCreds, mapSyncStatusToUi } from "@/lib/bappenas";
 import { createUserWebDav } from "@/lib/webdav";
 import { rateLimit } from "@/lib/rate-limit";
+import { buildFolderStatsMap } from "@/lib/folder-stats";
 
 export async function GET(request: NextRequest) {
   const session = await auth();
@@ -42,9 +43,16 @@ export async function GET(request: NextRequest) {
       .filter((e) => e.type === "file")
       .map((e) => e.path);
 
-    const syncRows =
+    const dirPaths = entries
+      .filter((e) => e.type === "directory")
+      .map((e) => e.path);
+
+    const parentNorm = path === "/" ? "/" : path.replace(/\/$/, "");
+    const browsePrefix = parentNorm === "/" ? "/" : `${parentNorm}/`;
+
+    const [syncRows, nestedSyncRows] = await Promise.all([
       filePaths.length > 0
-        ? await prisma.syncFile.findMany({
+        ? prisma.syncFile.findMany({
             where: {
               userId: session.user.id,
               remotePath: { in: filePaths },
@@ -54,20 +62,45 @@ export async function GET(request: NextRequest) {
               syncStatus: true,
               errorMessage: true,
               paperlessDocumentId: true,
+              fileSize: true,
             },
           })
-        : [];
+        : Promise.resolve([]),
+      dirPaths.length > 0
+        ? prisma.syncFile.findMany({
+            where: {
+              userId: session.user.id,
+              remotePath: { startsWith: browsePrefix },
+            },
+            select: {
+              remotePath: true,
+              syncStatus: true,
+              fileSize: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
 
     const byPath = new Map(syncRows.map((r) => [r.remotePath, r]));
+    const folderStatsMap = buildFolderStatsMap(
+      parentNorm,
+      dirPaths,
+      nestedSyncRows
+    );
 
     const items = entries.map((e) => {
       if (e.type === "directory") {
+        const folderStats = folderStatsMap.get(e.path) ?? null;
         return {
           ...e,
           ingestStatus: null as null,
           syncStage: null as null,
           errorMessage: null as string | null,
           paperlessDocumentId: null as number | null,
+          syncedFileSize: null as number | null,
+          isZeroByte: false,
+          folderStats,
+          cloudHint: null as null,
           selectable: false,
         };
       }
@@ -78,6 +111,10 @@ export async function GET(request: NextRequest) {
       const selectable =
         e.isPdf &&
         (ingestStatus === "not_ingested" || ingestStatus === "failed");
+      const syncedFileSize =
+        sync?.fileSize != null ? Number(sync.fileSize) : null;
+      const cloudZero = e.size === 0;
+      const syncedZero = syncedFileSize === 0;
 
       return {
         ...e,
@@ -85,11 +122,14 @@ export async function GET(request: NextRequest) {
         syncStage,
         errorMessage: sync?.errorMessage ?? null,
         paperlessDocumentId: sync?.paperlessDocumentId ?? null,
+        syncedFileSize,
+        isZeroByte: cloudZero || syncedZero,
+        folderStats: null,
+        cloudHint: null,
         selectable,
       };
     });
 
-    // Breadcrumb segments
     const parts = path === "/" ? [] : path.split("/").filter(Boolean);
     const breadcrumbs = [
       { name: "Root", path: "/" },

@@ -43,9 +43,28 @@ import {
   formatSyncAge,
 } from "@/lib/bappenas";
 import { DocPreviewLink } from "@/components/DocPreviewLink";
+import {
+  DocumentPreviewSheet,
+  PREVIEW_DEFAULT,
+  createPreviewResizeHandler,
+  readStoredPreviewWidth,
+  storePreviewWidth,
+} from "@/components/DocumentPreviewSheet";
 import { FolderTreeSidebar, type TreeFileOpen } from "@/components/FolderTreeSidebar";
+import { formatSize } from "@/lib/format-size";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
 
 type IngestStatus = "not_ingested" | "processing" | "done" | "failed" | null;
+
+type FolderStats = {
+  pdfCount: number;
+  scannedCount: number;
+  pendingCount: number;
+  failedCount: number;
+  processingCount: number;
+  zeroByteCount: number;
+  totalSize: number;
+};
 
 type CloudItem = {
   type: "directory" | "file";
@@ -59,6 +78,10 @@ type CloudItem = {
   syncStage: string | null;
   errorMessage: string | null;
   paperlessDocumentId: number | null;
+  syncedFileSize: number | null;
+  isZeroByte: boolean;
+  folderStats: FolderStats | null;
+  cloudHint: CloudFolderHint | null;
   selectable: boolean;
 };
 
@@ -70,6 +93,8 @@ type RecentFile = {
   remotePath: string;
   lastSyncedAt: string | null;
   paperlessDocumentId: number | null;
+  fileSize: number | null;
+  displayName?: string;
 };
 
 type IngestProgress = {
@@ -217,11 +242,178 @@ function clearFavoritesLocal() {
   }
 }
 
-function formatSize(bytes: number | null): string {
-  if (bytes == null) return "-";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+function fileSizeLabel(item: CloudItem): string {
+  const cloud = formatSize(item.size);
+  if (item.syncedFileSize != null && item.syncedFileSize !== item.size) {
+    return `${cloud} cloud · ${formatSize(item.syncedFileSize)} diambil`;
+  }
+  return cloud;
+}
+
+function FolderMetaLine({
+  stats,
+  cloudHint,
+  cloudHintLoading,
+  cloudHintPending,
+}: {
+  stats: FolderStats | null;
+  cloudHint: CloudFolderHint | null;
+  cloudHintLoading?: boolean;
+  cloudHintPending?: boolean;
+}) {
+  if (cloudHintLoading) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] text-[var(--auth-ink)]/40">
+        <Loader2 size={10} className="animate-spin" />
+        Memuat info cloud…
+      </span>
+    );
+  }
+
+  if (cloudHint?.isEmpty) {
+    return (
+      <span className="text-[11px] font-medium text-[var(--auth-ink)]/35">
+        Folder kosong
+      </span>
+    );
+  }
+
+  const cloudSegments: React.ReactNode[] = [];
+  if (cloudHint && cloudHint.pdfCount > 0) {
+    cloudSegments.push(
+      <span key="cloud-pdf">
+        {cloudHint.pdfCount} PDF di cloud · {formatSize(cloudHint.totalPdfSize)}
+      </span>
+    );
+    if (cloudHint.zeroBytePdfs > 0) {
+      cloudSegments.push(
+        <span key="cloud-zero" className="font-medium text-amber-700">
+          {cloudHint.zeroBytePdfs} file 0 B
+        </span>
+      );
+    }
+  } else if (cloudHint && cloudHint.dirCount > 0) {
+    cloudSegments.push(
+      <span key="sub">
+        {cloudHint.dirCount} subfolder
+        {cloudHint.fileCount - cloudHint.dirCount > 0
+          ? ` · ${cloudHint.fileCount - cloudHint.dirCount} file lain`
+          : ""}
+      </span>
+    );
+  }
+
+  const trackedSegments: React.ReactNode[] = [];
+  if (stats && stats.pdfCount > 0) {
+    trackedSegments.push(
+      <span key="tracked-count">{stats.pdfCount} PDF tercatat</span>,
+      <span key="tracked-size">{formatSize(stats.totalSize)}</span>
+    );
+    if (stats.scannedCount > 0) {
+      trackedSegments.push(
+        <span key="done" className="text-[var(--auth-teal)]">
+          {stats.scannedCount} siap
+        </span>
+      );
+    }
+    if (stats.pendingCount > 0) {
+      trackedSegments.push(
+        <span key="pending">{stats.pendingCount} belum discan</span>
+      );
+    }
+    if (stats.processingCount > 0) {
+      trackedSegments.push(
+        <span key="proc">{stats.processingCount} proses</span>
+      );
+    }
+    if (stats.failedCount > 0) {
+      trackedSegments.push(
+        <span key="fail" className="text-amber-700">
+          {stats.failedCount} gagal
+        </span>
+      );
+    }
+    if (stats.zeroByteCount > 0) {
+      trackedSegments.push(
+        <span key="zero" className="font-medium text-amber-700">
+          {stats.zeroByteCount} tercatat 0 B
+        </span>
+      );
+    }
+  }
+
+  if (cloudSegments.length === 0 && trackedSegments.length === 0) {
+    if (cloudHintPending) {
+      return (
+        <span className="text-[11px] text-[var(--auth-ink)]/35">
+          Arahkan untuk lihat isi cloud
+        </span>
+      );
+    }
+    return (
+      <span className="text-[11px] text-[var(--auth-ink)]/35">
+        Buka folder untuk lihat isi
+      </span>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {cloudSegments.length > 0 && (
+        <p className="flex flex-wrap items-center gap-x-1 text-[11px] text-[var(--auth-ink)]/50">
+          {cloudSegments.map((seg, i) => (
+            <span key={i} className="inline-flex items-center gap-1">
+              {i > 0 && <span className="text-[var(--auth-ink)]/20">·</span>}
+              {seg}
+            </span>
+          ))}
+        </p>
+      )}
+      {trackedSegments.length > 0 ? (
+        <p className="flex flex-wrap items-center gap-x-1 text-[11px] text-[var(--auth-ink)]/40">
+          {trackedSegments.map((seg, i) => (
+            <span key={i} className="inline-flex items-center gap-1">
+              {i > 0 && <span className="text-[var(--auth-ink)]/20">·</span>}
+              {seg}
+            </span>
+          ))}
+        </p>
+      ) : cloudHint && cloudHint.pdfCount > 0 ? (
+        <p className="text-[11px] text-amber-700/90">
+          PDF di cloud, belum ada yang tercatat di sistem
+        </p>
+      ) : cloudHintPending ? (
+        <p className="text-[11px] text-[var(--auth-ink)]/30">
+          Arahkan untuk info cloud
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function FolderStatusChip({ stats }: { stats: FolderStats | null }) {
+  if (!stats || stats.pdfCount === 0) return null;
+  const done = stats.scannedCount;
+  const total = stats.pdfCount;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const tone =
+    stats.failedCount > 0
+      ? "text-amber-700 bg-amber-50 border-amber-200"
+      : done === total
+        ? "text-[var(--auth-teal)] bg-[var(--auth-teal)]/10 border-[var(--auth-teal)]/20"
+        : "text-[var(--auth-ink)]/55 bg-[var(--auth-ink)]/[0.04] border-[var(--auth-ink)]/10";
+
+  return (
+    <span
+      className={cn(
+        "hidden shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold tabular-nums sm:inline",
+        tone
+      )}
+      title={`${done} dari ${total} PDF sudah siap`}
+    >
+      {pct}% siap
+    </span>
+  );
 }
 
 function statusRank(s: IngestStatus): number {
@@ -283,11 +475,23 @@ function CloudBrowserInner() {
   const [newestLimit, setNewestLimit] = useState("10");
   const [scope, setScope] = useState<"cloud" | "folder">("folder");
   const [recent, setRecent] = useState<RecentFile[]>([]);
+  const [recentTotal, setRecentTotal] = useState(0);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [pdfOnly, setPdfOnly] = useState(false);
   const [sort, setSort] = useState<SortKey>("name");
   const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
   const [previewId, setPreviewId] = useState<number | null>(null);
+  const [previewWidth, setPreviewWidth] = useState(PREVIEW_DEFAULT);
+  const [previewResizing, setPreviewResizing] = useState(false);
+  const cloudHintCache = useRef(new Map<string, CloudFolderHint>());
+  const cloudHintInflight = useRef(new Set<string>());
+  const cloudHintHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+  const [, setCloudHintRevision] = useState(0);
+  const [cloudHintLoadingPaths, setCloudHintLoadingPaths] = useState<
+    Set<string>
+  >(() => new Set());
   const [queue, setQueue] = useState<{
     ocrPending: number;
     downloading: number;
@@ -406,6 +610,7 @@ function CloudBrowserInner() {
       if (!res.ok) return;
       const data = await res.json();
       setRecent(data.files ?? []);
+      setRecentTotal(Number(data.total) || 0);
     } catch {
       // ignore
     }
@@ -600,6 +805,73 @@ function CloudBrowserInner() {
       .then(() => refreshFavoriteCounts(true));
     initialLoadDone.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
+  }, []);
+
+  useEffect(() => {
+    setPreviewWidth(readStoredPreviewWidth());
+  }, []);
+
+  const startPreviewResize = useCallback(
+    createPreviewResizeHandler(
+      previewWidth,
+      setPreviewWidth,
+      setPreviewResizing
+    ),
+    [previewWidth]
+  );
+
+  const resetPreviewWidth = useCallback(() => {
+    setPreviewWidth(PREVIEW_DEFAULT);
+    storePreviewWidth(PREVIEW_DEFAULT);
+  }, []);
+
+  const fetchCloudHint = useCallback(async (folderPath: string) => {
+    if (cloudHintCache.current.has(folderPath)) return;
+    if (cloudHintInflight.current.has(folderPath)) return;
+
+    cloudHintInflight.current.add(folderPath);
+    setCloudHintLoadingPaths((prev) => new Set(prev).add(folderPath));
+
+    try {
+      const res = await fetch(
+        `/api/cloud/folder-hint?path=${encodeURIComponent(folderPath)}`
+      );
+      const data = await res.json();
+      if (res.ok && data.hint) {
+        cloudHintCache.current.set(folderPath, data.hint as CloudFolderHint);
+        setCloudHintRevision((n) => n + 1);
+      }
+    } catch {
+      // ignore
+    } finally {
+      cloudHintInflight.current.delete(folderPath);
+      setCloudHintLoadingPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(folderPath);
+        return next;
+      });
+    }
+  }, []);
+
+  const scheduleCloudHint = useCallback(
+    (folderPath: string) => {
+      if (cloudHintCache.current.has(folderPath)) return;
+      if (cloudHintHoverTimer.current) {
+        clearTimeout(cloudHintHoverTimer.current);
+      }
+      cloudHintHoverTimer.current = setTimeout(() => {
+        void fetchCloudHint(folderPath);
+      }, 280);
+    },
+    [fetchCloudHint]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (cloudHintHoverTimer.current) {
+        clearTimeout(cloudHintHoverTimer.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -1557,10 +1829,19 @@ function CloudBrowserInner() {
 
       {/* Recent - above folder browser */}
       <div className="relative z-[1] border-b border-[var(--auth-teal)]/10 px-5 py-3 lg:px-8">
-        <p className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-teal)]">
-          <Sparkles size={11} />
-          Recent
-        </p>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-teal)]">
+            <Sparkles size={11} />
+            Recent
+          </p>
+          <Link
+            href="/cloud/recent"
+            className="text-[11px] font-semibold text-[var(--auth-teal)] hover:underline"
+          >
+            See more
+            {recentTotal > 5 ? ` (${recentTotal})` : ""}
+          </Link>
+        </div>
         {recent.length === 0 ? (
           <p className="text-[12px] text-[var(--auth-ink)]/40">
             Belum ada file yang baru di-scan.
@@ -1577,13 +1858,16 @@ function CloudBrowserInner() {
                     docId={f.paperlessDocumentId}
                     className="min-w-0 max-w-md truncate font-medium"
                   >
-                    {humanizeFileName(f.fileName)}
+                    {f.displayName ?? humanizeFileName(f.fileName)}
                   </DocPreviewLink>
                 ) : (
                   <span className="min-w-0 max-w-md truncate font-medium text-[var(--auth-ink)]">
-                    {humanizeFileName(f.fileName)}
+                    {f.displayName ?? humanizeFileName(f.fileName)}
                   </span>
                 )}
+                <span className="shrink-0 text-[11px] tabular-nums text-[var(--auth-ink)]/40">
+                  {formatSize(f.fileSize)}
+                </span>
                 <span className="flex shrink-0 items-center gap-2 text-[11px]">
                   {f.paperlessDocumentId && (
                     <Link
@@ -2030,6 +2314,8 @@ function CloudBrowserInner() {
                           type="button"
                           className="flex min-w-0 flex-1 items-center gap-3 text-left"
                           onClick={() => void openFolder(item.path)}
+                          onMouseEnter={() => scheduleCloudHint(item.path)}
+                          onFocus={() => scheduleCloudHint(item.path)}
                         >
                           <div className="flex h-9 w-9 shrink-0 items-center justify-center text-amber-600">
                             <Folder size={18} />
@@ -2038,11 +2324,30 @@ function CloudBrowserInner() {
                             <p className="truncate text-sm font-medium text-[var(--auth-ink)]">
                               {display}
                             </p>
-                            <p className="truncate text-[11px] text-[var(--auth-ink)]/35">
-                              Folder
-                              {item.lastModified &&
-                                ` · ${new Date(item.lastModified).toLocaleDateString("id-ID")}`}
-                            </p>
+                            <div className="mt-0.5">
+                              <FolderMetaLine
+                                stats={item.folderStats}
+                                cloudHint={
+                                  cloudHintCache.current.get(item.path) ??
+                                  item.cloudHint
+                                }
+                                cloudHintLoading={cloudHintLoadingPaths.has(
+                                  item.path
+                                )}
+                                cloudHintPending={
+                                  !cloudHintCache.current.has(item.path) &&
+                                  !item.cloudHint
+                                }
+                              />
+                            </div>
+                            {item.lastModified && (
+                              <p className="mt-0.5 truncate text-[10px] text-[var(--auth-ink)]/30">
+                                Diubah{" "}
+                                {new Date(item.lastModified).toLocaleDateString(
+                                  "id-ID"
+                                )}
+                              </p>
+                            )}
                           </div>
                         </button>
                       ) : (
@@ -2075,7 +2380,19 @@ function CloudBrowserInner() {
                               </p>
                             )}
                             <p className="truncate text-[11px] text-[var(--auth-ink)]/35">
-                              {formatSize(item.size)}
+                              <span
+                                className={cn(
+                                  item.isZeroByte &&
+                                    "font-semibold text-amber-700"
+                                )}
+                              >
+                                {fileSizeLabel(item)}
+                              </span>
+                              {item.isZeroByte && (
+                                <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">
+                                  0 B
+                                </span>
+                              )}
                               {item.lastModified &&
                                 ` · ${new Date(item.lastModified).toLocaleDateString("id-ID")}`}
                             </p>
@@ -2093,6 +2410,24 @@ function CloudBrowserInner() {
                               )}
                           </div>
                         </div>
+                      )}
+
+                      {item.type === "directory" && (
+                        <FolderStatusChip stats={item.folderStats} />
+                      )}
+
+                      {item.type === "file" && (
+                        <span
+                          className={cn(
+                            "hidden shrink-0 text-right text-[11px] font-medium tabular-nums sm:block sm:min-w-[4.5rem]",
+                            item.isZeroByte
+                              ? "text-amber-700"
+                              : "text-[var(--auth-ink)]/45"
+                          )}
+                          title={fileSizeLabel(item)}
+                        >
+                          {formatSize(item.size)}
+                        </span>
                       )}
 
                       {item.type === "file" && item.ingestStatus && (
@@ -2413,46 +2748,14 @@ function CloudBrowserInner() {
 
       {/* Preview sheet / rail overlay */}
       {previewId != null && (
-        <div className="fixed inset-0 z-40">
-          <button
-            type="button"
-            className="absolute inset-0 bg-[var(--auth-ink)]/30"
-            aria-label="Close"
-            onClick={() => setPreviewId(null)}
-          />
-          <div className="absolute inset-y-0 right-0 flex w-full max-w-lg flex-col bg-white shadow-xl">
-            <div className="flex items-center justify-between gap-3 border-b border-[var(--auth-ink)]/[0.06] px-4 py-3">
-              <div className="flex items-center gap-3 text-[12px]">
-                <Link
-                  href={`/?doc=${previewId}`}
-                  className="inline-flex items-center gap-1 font-semibold text-[var(--auth-teal)]"
-                >
-                  <MessageSquare size={13} />
-                  Ask AI
-                </Link>
-                <a
-                  href={`/api/documents/${previewId}/download`}
-                  className="text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
-                >
-                  Download
-                </a>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPreviewId(null)}
-                className="p-1.5 text-[var(--auth-ink)]/40"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <iframe
-              title="Preview"
-              src={`/api/documents/${previewId}/preview`}
-              className="min-h-0 w-full flex-1 bg-[var(--auth-paper)]"
-            />
-          </div>
-        </div>
+        <DocumentPreviewSheet
+          docId={previewId}
+          onClose={() => setPreviewId(null)}
+          width={previewWidth}
+          onResizeStart={startPreviewResize}
+          onResetWidth={resetPreviewWidth}
+          resizing={previewResizing}
+        />
       )}
     </div>
   );
