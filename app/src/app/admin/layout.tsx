@@ -3,6 +3,8 @@ import { AppShell } from "@/components/AppShell";
 import { AdminShellHeader } from "@/components/AdminShellHeader";
 import { AdminNav } from "@/components/AdminNav";
 
+export const dynamic = "force-dynamic";
+
 export default async function AdminLayout({
   children,
 }: {
