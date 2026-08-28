@@ -9,8 +9,11 @@ export default auth((req) => {
   const isAuth = path.startsWith("/api/auth");
   const isHealth = path.startsWith("/api/health");
   const isRegisterApi = path.startsWith("/api/register");
+  const isWhatsAppIntegration = path.startsWith("/api/integrations/whatsapp");
 
-  if (isAuth || isHealth || isRegisterApi) return NextResponse.next();
+  if (isAuth || isHealth || isRegisterApi || isWhatsAppIntegration) {
+    return NextResponse.next();
+  }
 
   if (!isLoggedIn && !isLoginPage && !isRegisterPage) {
     if (path.startsWith("/api/")) {
