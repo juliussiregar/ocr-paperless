@@ -55,6 +55,8 @@ export async function POST(request: NextRequest) {
     ? String(body.conversationId)
     : null;
 
+  const includeFiles = body.includeFiles !== false;
+
   if (!question) {
     return NextResponse.json(
       { error: "Pertanyaan tidak boleh kosong" },
@@ -138,7 +140,8 @@ export async function POST(request: NextRequest) {
     const documents = await buildWhatsAppDocuments(
       result.citations,
       userId,
-      baseUrl
+      baseUrl,
+      { includeFiles }
     );
 
     const assistant = await prisma.chatMessage.create({
@@ -166,6 +169,7 @@ export async function POST(request: NextRequest) {
     await writeAudit("chat.whatsapp", userId, {
       question: question.slice(0, 200),
       citations: documents.length,
+      includeFiles,
       conversationId: conversation.id,
       channel: "whatsapp",
       openai: chatHits > 0 || embeddingHits > 0,
