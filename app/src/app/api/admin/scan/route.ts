@@ -6,6 +6,7 @@ import { enqueueScanJob } from "@/lib/queue";
 import { writeAudit } from "@/lib/audit";
 import { activeScanJobWhere } from "@/lib/scan-status";
 import { getAutoScanSettings } from "@/lib/app-settings";
+import { SYNC_ROOT_PATH, syncBatchSize } from "@/lib/sync-defaults";
 import { listUsersWithBappenasCreds } from "@/lib/bappenas";
 import { getScanHealth, releaseUserScanLock } from "@/lib/scan-health";
 
@@ -195,17 +196,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (body.action === "triggerAll") {
-    const settings = await getAutoScanSettings();
     const rootPath =
       typeof body.rootPath === "string" && body.rootPath.trim()
         ? body.rootPath.trim()
-        : settings.autoScanRootPath || "/";
+        : SYNC_ROOT_PATH;
     const limit = Math.max(
       1,
-      Math.min(
-        500,
-        Number(body.limit) || settings.autoScanBatchSize || 30
-      )
+      Math.min(500, Number(body.limit) || syncBatchSize())
     );
 
     const users = await listUsersWithBappenasCreds();
@@ -273,10 +270,10 @@ export async function POST(request: NextRequest) {
   const rootPath =
     typeof body.rootPath === "string" && body.rootPath.trim()
       ? body.rootPath.trim()
-      : "/";
+      : SYNC_ROOT_PATH;
   const limit = Math.max(
     1,
-    Math.min(500, Number(body.limit) || 30)
+    Math.min(500, Number(body.limit) || syncBatchSize())
   );
   const reconcileOnly = body.reconcileOnly === true;
 

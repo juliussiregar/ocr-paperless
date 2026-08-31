@@ -47,30 +47,20 @@ Dokumen ini mencatat semua fase pengembangan auto download/OCR dari Nextcloud Ba
 
 ## Mengaktifkan auto download (setelah uji)
 
-Lihat checklist lengkap: [deploy.md](./deploy.md)
-
-1. Deploy code (`./scripts/server-up.sh`, schema via `db push` otomatis di app)
-2. Uji manual: Admin → Backlog OCR → **Delta** per user, atau `POST /api/admin/scan`
-3. Admin → **Siap deploy** = ON
-4. Set interval, batch, root path (default `/`)
-5. **Jadwal auto scan** = ON
-6. Opsional: auto retry FAILED, subtree JSON
-7. Opsional env: `AUTO_SCAN_ENABLED=true` (tetap butuh **Siap deploy**)
+1. Deploy code
+2. Admin → **Sync cloud** → **Sync semua user** (uji manual)
+3. Nyalakan **Jadwal otomatis**, set **Interval sync** (menit)
+4. Batch, root `/`, retry: otomatis dari env server (`SCAN_MAX_FILES`, dll.)
 
 ## Pengaturan DB (`app_settings`)
 
 | Key | Default | Deskripsi |
 |-----|---------|-----------|
-| `auto_scan_ready` | `false` | Gate: code siap production |
-| `auto_scan_enabled` | `false` | Toggle jadwal delta_sync |
-| `auto_scan_interval_minutes` | `60` | Interval tick |
-| `auto_scan_batch_size` | `50` | Max file ingest per job |
-| `auto_scan_root_path` | `/` | Root WebDAV listing |
-| `auto_scan_subtrees` | `` | JSON array path untuk rotasi subtree |
-| `auto_scan_subtree_index` | `0` | Index rotasi (internal) |
-| `auto_retry_enabled` | `false` | Scheduler retry FAILED |
-| `auto_retry_interval_minutes` | `120` | Interval retry |
-| `auto_retry_batch_size` | `30` | Max file per retry tick |
+| `auto_scan_enabled` | `false` | Toggle jadwal (Admin UI) |
+| `auto_scan_interval_minutes` | `60` | Interval tick (Admin UI) |
+| `auto_scan_batch_size` | dari env | Internal, tidak di UI |
+| `auto_scan_root_path` | `/` | Internal |
+| `auto_retry_enabled` | `true` | Internal, default on |
 
 ## Env worker
 

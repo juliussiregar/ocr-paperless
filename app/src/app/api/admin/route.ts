@@ -43,21 +43,11 @@ export async function POST(request: NextRequest) {
   if (action === "updateSettings") {
     const patch: {
       autoScanEnabled?: boolean;
-      autoScanReady?: boolean;
       autoScanIntervalMinutes?: number;
-      autoScanBatchSize?: number;
-      autoScanRootPath?: string;
-      autoScanSubtrees?: string;
-      autoRetryEnabled?: boolean;
-      autoRetryIntervalMinutes?: number;
-      autoRetryBatchSize?: number;
     } = {};
 
     if (typeof body.autoScanEnabled === "boolean") {
       patch.autoScanEnabled = body.autoScanEnabled;
-    }
-    if (typeof body.autoScanReady === "boolean") {
-      patch.autoScanReady = body.autoScanReady;
     }
     if (body.autoScanIntervalMinutes != null) {
       const n = Number(body.autoScanIntervalMinutes);
@@ -68,45 +58,6 @@ export async function POST(request: NextRequest) {
         );
       }
       patch.autoScanIntervalMinutes = Math.floor(n);
-    }
-    if (body.autoScanBatchSize != null) {
-      const n = Number(body.autoScanBatchSize);
-      if (!Number.isFinite(n) || n < 1) {
-        return NextResponse.json(
-          { error: "Batch minimal 1 file" },
-          { status: 400 }
-        );
-      }
-      patch.autoScanBatchSize = Math.floor(n);
-    }
-    if (typeof body.autoScanRootPath === "string") {
-      patch.autoScanRootPath = body.autoScanRootPath.trim() || "/";
-    }
-    if (typeof body.autoScanSubtrees === "string") {
-      patch.autoScanSubtrees = body.autoScanSubtrees;
-    }
-    if (typeof body.autoRetryEnabled === "boolean") {
-      patch.autoRetryEnabled = body.autoRetryEnabled;
-    }
-    if (body.autoRetryIntervalMinutes != null) {
-      const n = Number(body.autoRetryIntervalMinutes);
-      if (!Number.isFinite(n) || n < 15) {
-        return NextResponse.json(
-          { error: "Interval retry minimal 15 menit" },
-          { status: 400 }
-        );
-      }
-      patch.autoRetryIntervalMinutes = Math.floor(n);
-    }
-    if (body.autoRetryBatchSize != null) {
-      const n = Number(body.autoRetryBatchSize);
-      if (!Number.isFinite(n) || n < 1) {
-        return NextResponse.json(
-          { error: "Batch retry minimal 1 file" },
-          { status: 400 }
-        );
-      }
-      patch.autoRetryBatchSize = Math.floor(n);
     }
 
     if (Object.keys(patch).length === 0) {

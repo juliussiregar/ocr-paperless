@@ -1,9 +1,12 @@
 import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { enqueueScanJob } from "./scan-queues.js";
-import { scanMaxFiles } from "./sync-job-helpers.js";
 import { hasActiveScanJobForUser } from "./sync.js";
 import { ingestMaxRetries } from "./sync-fail.js";
+import {
+  AUTO_RETRY_BATCH_SIZE,
+  AUTO_RETRY_INTERVAL_MINUTES,
+} from "./sync-defaults.js";
 
 const SETTING_AUTO_RETRY_ENABLED = "auto_retry_enabled";
 const SETTING_AUTO_RETRY_LAST_RUN_AT = "auto_retry_last_run_at";
@@ -24,20 +27,24 @@ async function setSetting(key: string, value: string): Promise<void> {
 }
 
 export async function isAutoRetryEnabled(): Promise<boolean> {
-  return (await getSetting(SETTING_AUTO_RETRY_ENABLED)) === "true";
+  const raw = await getSetting(SETTING_AUTO_RETRY_ENABLED);
+  if (raw === "false") return false;
+  return true;
 }
 
 async function retryIntervalMs(): Promise<number> {
-  const raw = Number((await getSetting(SETTING_AUTO_RETRY_INTERVAL_MINUTES)) ?? "120");
-  const minutes = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 120;
+  const raw = Number(
+    (await getSetting(SETTING_AUTO_RETRY_INTERVAL_MINUTES)) ??
+      String(AUTO_RETRY_INTERVAL_MINUTES)
+  );
+  const minutes = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : AUTO_RETRY_INTERVAL_MINUTES;
   return minutes * 60_000;
 }
 
 async function retryBatchSize(): Promise<number> {
   const raw = Number((await getSetting(SETTING_AUTO_RETRY_BATCH_SIZE)) ?? "");
   if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
-  const env = scanMaxFiles();
-  return env > 0 ? env : 30;
+  return AUTO_RETRY_BATCH_SIZE;
 }
 
 /** Phase 3: retry FAILED paths on separate schedule from delta auto-scan. */

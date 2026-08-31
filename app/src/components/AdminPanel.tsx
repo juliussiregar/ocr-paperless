@@ -9,14 +9,7 @@ import { AdminAuditPanel } from "@/components/AdminAuditPanel";
 
 interface AutoScanSettings {
   autoScanEnabled: boolean;
-  autoScanReady: boolean;
   autoScanIntervalMinutes: number;
-  autoScanBatchSize: number;
-  autoScanRootPath: string;
-  autoScanSubtrees: string;
-  autoRetryEnabled: boolean;
-  autoRetryIntervalMinutes: number;
-  autoRetryBatchSize: number;
   autoScanLastRunAt: string | null;
   envForceEnabled?: boolean;
 }
@@ -126,19 +119,6 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
   const [intervalInput, setIntervalInput] = useState(
     String(initialSettings.autoScanIntervalMinutes)
   );
-  const [batchInput, setBatchInput] = useState(
-    String(initialSettings.autoScanBatchSize)
-  );
-  const [rootInput, setRootInput] = useState(initialSettings.autoScanRootPath);
-  const [subtreesInput, setSubtreesInput] = useState(
-    initialSettings.autoScanSubtrees ?? ""
-  );
-  const [retryIntervalInput, setRetryIntervalInput] = useState(
-    String(initialSettings.autoRetryIntervalMinutes ?? 120)
-  );
-  const [retryBatchInput, setRetryBatchInput] = useState(
-    String(initialSettings.autoRetryBatchSize ?? 30)
-  );
   const [backlog, setBacklog] = useState<BacklogRow[]>([]);
   const [recentJobs, setRecentJobs] = useState<RecentJobRow[]>([]);
   const [scanHealth, setScanHealth] = useState<ScanHealth | null>(null);
@@ -168,12 +148,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
       }
       setSettings(data.settings);
       setIntervalInput(String(data.settings.autoScanIntervalMinutes));
-      setBatchInput(String(data.settings.autoScanBatchSize));
-      setRootInput(data.settings.autoScanRootPath);
-      setSubtreesInput(data.settings.autoScanSubtrees ?? "");
-      setRetryIntervalInput(String(data.settings.autoRetryIntervalMinutes));
-      setRetryBatchInput(String(data.settings.autoRetryBatchSize));
-      showMsg("Pengaturan auto scan disimpan");
+      showMsg("Pengaturan sync disimpan");
     } finally {
       setSavingScan(false);
     }
@@ -208,8 +183,6 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
-          rootPath: settings.autoScanRootPath,
-          limit: settings.autoScanBatchSize,
           reconcileOnly,
         }),
       });
@@ -235,11 +208,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
       const res = await fetch("/api/admin/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "triggerAll",
-          rootPath: rootInput,
-          limit: Number(batchInput),
-        }),
+        body: JSON.stringify({ action: "triggerAll" }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -278,8 +247,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
   }
 
   const schedulerActive =
-    settings.autoScanReady &&
-    (settings.autoScanEnabled || settings.envForceEnabled);
+    settings.autoScanEnabled || settings.envForceEnabled;
 
   return (
     <div className="space-y-6">
@@ -646,29 +614,23 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
               <RefreshCw size={18} />
             </div>
             <div>
-              <h2 className="section-title">Auto scan</h2>
+              <h2 className="section-title">Sync cloud</h2>
               <p className="text-xs text-slate-500">
-                Delta sync dari cloud root (tidak pakai folder favorit). Default
-                nonaktif sampai ditandai siap.
+                Cek cloud, download, dan OCR. Batch, folder root, dan retry
+                memakai pengaturan server (tidak perlu diatur manual).
               </p>
             </div>
           </div>
         </div>
         <div className="space-y-5 p-6">
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
-            Aktifkan auto download hanya setelah uji delta sync di staging.
-            Tandai <strong>Siap deploy</strong> lalu nyalakan toggle jadwal.
-          </div>
-
           <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-teal-200 bg-teal-50/60 px-4 py-4">
             <div>
               <p className="text-sm font-medium text-slate-800">
-                Jalankan sync sekarang
+                Jalankan sekarang
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                Discover, download, dan scan untuk semua user dengan kredensial
-                Bappenas. Pakai batch dan root path di bawah. User yang punya job
-                aktif dilewati.
+                Satu klik untuk semua user dengan kredensial Bappenas. User yang
+                punya job aktif dilewati.
               </p>
             </div>
             <button
@@ -684,48 +646,18 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
 
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <p className="text-sm font-medium text-slate-800">Siap deploy</p>
-              <p className="mt-1 text-xs text-slate-500">
-                Wajib true sebelum scheduler jalan (kecuali dipaksa env).
-              </p>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={settings.autoScanReady}
-              disabled={savingScan}
-              onClick={() =>
-                void saveSettings({ autoScanReady: !settings.autoScanReady })
-              }
-              className={cn(
-                "relative h-7 w-12 shrink-0 rounded-full transition-colors",
-                settings.autoScanReady ? "bg-teal-600" : "bg-slate-300",
-                savingScan && "opacity-60"
-              )}
-            >
-              <span
-                className={cn(
-                  "absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform",
-                  settings.autoScanReady && "translate-x-5"
-                )}
-              />
-            </button>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
               <p className="text-sm font-medium text-slate-800">
-                Jadwal auto scan
+                Jadwal otomatis
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                Job delta_sync per user (rotate by last discovery).
+                Delta sync berulang untuk setiap user (rotate).
               </p>
             </div>
             <button
               type="button"
               role="switch"
               aria-checked={settings.autoScanEnabled}
-              disabled={savingScan || !settings.autoScanReady}
+              disabled={savingScan}
               onClick={() =>
                 void saveSettings({
                   autoScanEnabled: !settings.autoScanEnabled,
@@ -734,7 +666,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
               className={cn(
                 "relative h-7 w-12 shrink-0 rounded-full transition-colors",
                 settings.autoScanEnabled ? "bg-teal-600" : "bg-slate-300",
-                (savingScan || !settings.autoScanReady) && "opacity-60"
+                savingScan && "opacity-60"
               )}
             >
               <span
@@ -746,9 +678,9 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
             </button>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-3">
-            <label className="block text-xs text-slate-600">
-              Interval (menit)
+          <div className="flex flex-wrap items-end gap-4">
+            <label className="block text-xs text-slate-600 min-w-[140px]">
+              Interval sync (menit)
               <input
                 type="number"
                 min={5}
@@ -758,123 +690,23 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
                 disabled={savingScan}
               />
             </label>
-            <label className="block text-xs text-slate-600">
-              Batch ingest (file/job)
-              <input
-                type="number"
-                min={1}
-                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                value={batchInput}
-                onChange={(e) => setBatchInput(e.target.value)}
-                disabled={savingScan}
-              />
-            </label>
-            <label className="block text-xs text-slate-600">
-              Cloud root path
-              <input
-                type="text"
-                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                value={rootInput}
-                onChange={(e) => setRootInput(e.target.value)}
-                placeholder="/"
-                disabled={savingScan}
-              />
-            </label>
-          </div>
-
-          <button
-            type="button"
-            disabled={savingScan}
-            onClick={() =>
-              void saveSettings({
-                autoScanIntervalMinutes: Number(intervalInput),
-                autoScanBatchSize: Number(batchInput),
-                autoScanRootPath: rootInput,
-                autoScanSubtrees: subtreesInput,
-                autoRetryIntervalMinutes: Number(retryIntervalInput),
-                autoRetryBatchSize: Number(retryBatchInput),
-              })
-            }
-            className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
-          >
-            Simpan interval / batch / root / subtree
-          </button>
-
-          <label className="block text-xs text-slate-600">
-            Subtree rotation (JSON array path, opsional)
-            <textarea
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono"
-              rows={2}
-              value={subtreesInput}
-              onChange={(e) => setSubtreesInput(e.target.value)}
-              placeholder='["/folder-a","/folder-b"]'
+            <button
+              type="button"
               disabled={savingScan}
-            />
-          </label>
-
-          <div className="rounded-lg border border-slate-200 px-4 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-slate-800">
-                  Auto retry FAILED
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Scheduler terpisah: re-queue file gagal ke ingest queue.
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.autoRetryEnabled}
-                disabled={savingScan || !settings.autoScanReady}
-                onClick={() =>
-                  void saveSettings({
-                    autoRetryEnabled: !settings.autoRetryEnabled,
-                  })
-                }
-                className={cn(
-                  "relative h-7 w-12 shrink-0 rounded-full transition-colors",
-                  settings.autoRetryEnabled ? "bg-teal-600" : "bg-slate-300",
-                  (savingScan || !settings.autoScanReady) && "opacity-60"
-                )}
-              >
-                <span
-                  className={cn(
-                    "absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform",
-                    settings.autoRetryEnabled && "translate-x-5"
-                  )}
-                />
-              </button>
-            </div>
-            <div className="mt-3 grid gap-4 sm:grid-cols-2">
-              <label className="block text-xs text-slate-600">
-                Interval retry (menit)
-                <input
-                  type="number"
-                  min={15}
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  value={retryIntervalInput}
-                  onChange={(e) => setRetryIntervalInput(e.target.value)}
-                  disabled={savingScan}
-                />
-              </label>
-              <label className="block text-xs text-slate-600">
-                Batch retry (file)
-                <input
-                  type="number"
-                  min={1}
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  value={retryBatchInput}
-                  onChange={(e) => setRetryBatchInput(e.target.value)}
-                  disabled={savingScan}
-                />
-              </label>
-            </div>
+              onClick={() =>
+                void saveSettings({
+                  autoScanIntervalMinutes: Number(intervalInput),
+                })
+              }
+              className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+            >
+              Simpan interval
+            </button>
           </div>
 
           <dl className="grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
             <div>
-              <dt className="font-medium text-slate-500">Scheduler</dt>
+              <dt className="font-medium text-slate-500">Jadwal</dt>
               <dd>
                 {schedulerActive ? "Aktif" : "Nonaktif"}
                 {settings.envForceEnabled && (
