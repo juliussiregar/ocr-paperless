@@ -5,6 +5,7 @@ import {
   Activity,
   Radio,
   RefreshCw,
+  RotateCcw,
   Server,
 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
@@ -48,9 +49,9 @@ interface LiveUser {
   ocrPending: number;
   downloading: number;
   failed: number;
+  warnings: number;
   failedRetryable: number;
   failedExhausted: number;
-  scanLockHeld: boolean;
   activeJob: {
     id: string;
     jobType: string;
@@ -103,6 +104,8 @@ interface LivePayload {
   batchSize: number;
   batchUnlimited: boolean;
   credsUserCount: number;
+  emptyFileWarning: { message: string; count: number };
+  failedBreakdown: Array<{ errorMessage: string; count: number }>;
   pipeline: {
     ocrDone: number;
     ocrPending: number;
@@ -110,6 +113,7 @@ interface LivePayload {
     downloading: number;
     discovered: number;
     failed: number;
+    warnings: number;
     skipped: number;
     deleted: number;
     embedPending: number;
@@ -130,6 +134,57 @@ function formatDurationMs(ms: number | null | undefined): string {
   const min = Math.floor(sec / 60);
   const rem = sec % 60;
   return rem > 0 ? `${min}m ${rem}s` : `${min}m`;
+}
+
+function ProgressTrack({
+  label,
+  current,
+  total,
+  variant = "teal",
+  hint,
+}: {
+  label: string;
+  current: number;
+  total: number | null;
+  variant?: "teal" | "violet";
+  hint?: string;
+}) {
+  const pct =
+    total != null && total > 0
+      ? Math.min(100, Math.round((current / total) * 100))
+      : null;
+  const barColor = variant === "violet" ? "bg-violet-500" : "bg-teal-500";
+
+  return (
+    <div>
+      <div className="flex justify-between text-xs text-slate-600">
+        <span>
+          {label}
+          {total != null ? (
+            <span className="tabular-nums">
+              {" "}
+              {current}/{total}
+            </span>
+          ) : (
+            <span className="tabular-nums"> {current}</span>
+          )}
+        </span>
+        {pct != null && <span className="tabular-nums">{pct}%</span>}
+      </div>
+      {pct != null && (
+        <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div
+            className={cn(
+              "h-full rounded-full transition-all duration-500",
+              barColor
+            )}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      {hint && <p className="mt-0.5 text-[10px] text-slate-400">{hint}</p>}
+    </div>
+  );
 }
 
 function inferStage(data: LivePayload): PipelineStage {
@@ -176,9 +231,7 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
     String(initialSettings.autoScanIntervalMinutes)
   );
   const [triggeringUserId, setTriggeringUserId] = useState<string | null>(null);
-  const [releasingLockUserId, setReleasingLockUserId] = useState<string | null>(
-    null
-  );
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function showMsg(text: string, type: "success" | "error" = "success") {
@@ -312,23 +365,39 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
     }
   }
 
-  async function releaseUserLock(userId: string) {
-    setReleasingLockUserId(userId);
+  async function retryFailed(userId?: string, allUsers = false) {
+    const key = allUsers ? "all" : userId ?? "";
+    setRetryingId(key);
     try {
       const res = await fetch("/api/admin/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "releaseLock", userId }),
+        body: JSON.stringify({
+          action: "retryFailed",
+          allUsers,
+          userId,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
-        showMsg(data.error ?? "Gagal release lock", "error");
+        showMsg(data.error ?? "Gagal retry failed", "error");
         return;
       }
-      showMsg(data.released ? "Scan lock dilepas" : "Tidak ada lock aktif");
+      if (allUsers) {
+        const n = data.enqueued?.length ?? 0;
+        showMsg(
+          n > 0
+            ? `Retry manual: ${n} user, job dibuat (max ${batchLabel}/user)`
+            : "Tidak ada file gagal untuk diulang"
+        );
+      } else {
+        showMsg(
+          `Retry ${data.totalFiles ?? 0} file gagal, job ${data.jobId ?? ""}`
+        );
+      }
       void pollLive();
     } finally {
-      setReleasingLockUserId(null);
+      setRetryingId(null);
     }
   }
 
@@ -549,14 +618,95 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
         )}
       </Card>
 
+      {(pipeline?.warnings ?? 0) > 0 && (
+        <Card className="!p-0 overflow-hidden">
+          <div className="border-b border-slate-100 px-6 py-4">
+            <h2 className="section-title">
+              Peringatan file kosong ({pipeline?.warnings ?? 0})
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              {live?.emptyFileWarning?.message ??
+                "File 0 byte tidak bisa di-OCR. Perbaiki atau ganti file di Cloud Bappenas."}
+            </p>
+          </div>
+          <div className="px-6 py-4 text-xs text-slate-600">
+            <p>
+              File ini dilewati (status SKIPPED), bukan gagal. Tidak perlu
+              retry. Setelah file diperbaiki di cloud, trigger delta sync lagi.
+            </p>
+          </div>
+        </Card>
+      )}
+
+      {(pipeline?.failed ?? 0) > 0 && (
+        <Card className="!p-0 overflow-hidden">
+          <div className="border-b border-slate-100 px-6 py-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="section-title">
+                  File gagal ({pipeline?.failed ?? 0})
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  Auto-retry worker: 1x per file. Sisanya retry manual di sini
+                  (max {batchLabel} per batch).
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={retryingId !== null}
+                onClick={() => void retryFailed(undefined, true)}
+                className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+              >
+                <RotateCcw size={14} />
+                Retry semua failed
+              </button>
+            </div>
+          </div>
+          <div className="px-6 py-4">
+            <ul className="space-y-2 text-xs text-slate-600">
+              {live?.failedBreakdown?.map((row) => (
+                <li
+                  key={row.errorMessage}
+                  className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
+                >
+                  <span className="min-w-0 flex-1">{row.errorMessage}</span>
+                  <span className="shrink-0 tabular-nums font-medium text-slate-800">
+                    {row.count}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-[11px] text-slate-500">
+              Error jaringan (503) atau unduh timeout bisa dicoba retry manual.
+              File kosong (0 byte) sudah dipindah ke peringatan di atas.
+            </p>
+          </div>
+        </Card>
+      )}
+
       {live && live.activeJobs.length > 0 && (
         <Card className="!p-0 overflow-hidden">
           <div className="border-b border-slate-100 px-6 py-4">
             <h2 className="section-title">Job aktif ({live.activeJobs.length})</h2>
           </div>
           <div className="divide-y divide-slate-100">
-            {live.activeJobs.map((job) => (
-              <div key={job.id} className="space-y-2 px-6 py-4">
+            {live.activeJobs.map((job) => {
+              const userStats = live.users?.find(
+                (u) =>
+                  u.userId === job.user?.id ||
+                  u.email === job.user?.email
+              );
+              const showDownload =
+                job.jobType === "ingest_paths" && job.totalFiles > 0;
+              const showDiscover =
+                job.phase === "discovering" || job.jobType === "delta_sync";
+              const ocrDone = userStats?.ocrDone ?? 0;
+              const ocrPending = userStats?.ocrPending ?? 0;
+              const ocrTotal = ocrDone + ocrPending;
+              const showOcr = ocrTotal > 0;
+
+              return (
+              <div key={job.id} className="space-y-3 px-6 py-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <p className="text-sm font-medium text-slate-800">
@@ -570,41 +720,47 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                     {job.status}
                   </span>
                 </div>
-                {job.totalFiles > 0 && (
-                  <div>
-                    <div className="flex justify-between text-xs text-slate-600">
-                      <span>
-                        {job.processedFiles}/{job.totalFiles} file
-                        {job.newFiles > 0 && (
-                          <span className="text-teal-600"> +{job.newFiles} baru</span>
-                        )}
-                        {job.skippedFiles > 0 && (
-                          <span className="text-slate-400">
-                            {" "}
-                            skip {job.skippedFiles}
-                          </span>
-                        )}
-                        {job.failedFiles > 0 && (
-                          <span className="text-red-600">
-                            {" "}
-                            fail {job.failedFiles}
-                          </span>
-                        )}
-                      </span>
-                      {job.progressPct != null && (
-                        <span className="tabular-nums">{job.progressPct}%</span>
-                      )}
-                    </div>
-                    <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
-                      <div
-                        className="h-full rounded-full bg-teal-500 transition-all duration-500"
-                        style={{
-                          width: `${job.progressPct ?? 0}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
+
+                <div className="space-y-2">
+                  {showDownload && (
+                    <ProgressTrack
+                      label="1. Unduh + kirim Paperless"
+                      current={job.processedFiles}
+                      total={job.totalFiles}
+                      variant="teal"
+                      hint={
+                        job.failedFiles > 0
+                          ? `Gagal ${job.failedFiles}, skip ${job.skippedFiles}`
+                          : job.skippedFiles > 0
+                            ? `Skip ${job.skippedFiles}`
+                            : undefined
+                      }
+                    />
+                  )}
+                  {showDiscover && !showDownload && (
+                    <ProgressTrack
+                      label="1. Discover cloud"
+                      current={job.processedFiles}
+                      total={null}
+                      variant="teal"
+                      hint="Folder yang sudah di-scan"
+                    />
+                  )}
+                  {showOcr && (
+                    <ProgressTrack
+                      label="2. OCR Paperless"
+                      current={ocrDone}
+                      total={ocrTotal}
+                      variant="violet"
+                      hint={
+                        ocrPending > 0
+                          ? `${ocrPending} file masih diproses OCR`
+                          : "OCR backlog habis"
+                      }
+                    />
+                  )}
+                </div>
+
                 {job.currentFile && (
                   <p className="truncate font-mono text-[10px] text-slate-400">
                     {job.currentFile}
@@ -614,7 +770,8 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                   <p className="text-xs text-red-600">{job.errorMessage}</p>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </Card>
       )}
@@ -628,12 +785,13 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
             <div>
               <h2 className="section-title">Scan health</h2>
               <p className="text-xs text-slate-500">
-                Queue BullMQ, Redis, job macet, dan user lock.
+                Queue BullMQ, Redis, dan job macet. Pause job lewat worker jika
+                perlu hentikan sementara.
               </p>
             </div>
           </div>
         </div>
-        <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
             <p className="font-medium text-slate-600">Discover queue</p>
             <p className="mt-1 tabular-nums text-slate-800">
@@ -663,12 +821,6 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
             <p className="mt-1 text-slate-800">
               {health?.redis.usedMemoryHuman ?? "-"} /{" "}
               {health?.redis.maxMemoryHuman ?? "-"}
-            </p>
-          </div>
-          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
-            <p className="font-medium text-slate-600">User locks</p>
-            <p className="mt-1 text-slate-800">
-              {health?.userLocks.length ?? 0} aktif
             </p>
           </div>
         </div>
@@ -718,8 +870,8 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                 <th className="py-2 pr-3">User</th>
                 <th className="py-2 pr-3">OCR done</th>
                 <th className="py-2 pr-3">Pending</th>
+                <th className="py-2 pr-3">Peringatan</th>
                 <th className="py-2 pr-3">Failed</th>
-                <th className="py-2 pr-3">Lock</th>
                 <th className="py-2 pr-3">Job aktif</th>
                 <th className="py-2">Aksi</th>
               </tr>
@@ -748,26 +900,25 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                     {row.ocrPending + row.downloading}
                   </td>
                   <td className="py-2 pr-3 tabular-nums">
-                    {row.failed}
-                    {row.failedRetryable > 0 && (
-                      <span className="text-amber-600">
-                        {" "}
-                        ({row.failedRetryable} retry)
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-2 pr-3">
-                    {row.scanLockHeld ? (
-                      <button
-                        type="button"
-                        disabled={releasingLockUserId === row.userId}
-                        onClick={() => void releaseUserLock(row.userId)}
-                        className="text-amber-700 hover:underline disabled:opacity-50"
-                      >
-                        Lock
-                      </button>
+                    {row.warnings > 0 ? (
+                      <span className="text-amber-700">{row.warnings}</span>
                     ) : (
                       <span className="text-slate-400">-</span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3 tabular-nums">
+                    {row.failed}
+                    {row.failedRetryable > 0 && (
+                      <span className="text-slate-400">
+                        {" "}
+                        ({row.failedRetryable} auto)
+                      </span>
+                    )}
+                    {row.failedExhausted > 0 && (
+                      <span className="text-amber-600">
+                        {" "}
+                        ({row.failedExhausted} manual)
+                      </span>
                     )}
                   </td>
                   <td className="py-2 pr-3 text-slate-600">
@@ -798,6 +949,18 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                         className="rounded border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                       >
                         Reconcile
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          row.failed === 0 ||
+                          retryingId !== null ||
+                          row.activeJob != null
+                        }
+                        onClick={() => void retryFailed(row.userId)}
+                        className="rounded border border-amber-200 px-2 py-1 text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                      >
+                        Retry failed
                       </button>
                     </div>
                   </td>

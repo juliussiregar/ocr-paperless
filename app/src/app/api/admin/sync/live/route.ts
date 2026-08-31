@@ -3,9 +3,15 @@ import { ScanJobStatus, SyncStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdminApi } from "@/lib/session";
 import { getAutoScanSettings } from "@/lib/app-settings";
-import { getScanHealth, ingestMaxRetries } from "@/lib/scan-health";
+import { getScanHealth } from "@/lib/scan-health";
 import { listUsersWithBappenasCreds } from "@/lib/bappenas";
 import { syncBatchSize } from "@/lib/sync-defaults";
+import {
+  emptyFileWarningWhere,
+  isEmptyFileWarningMessage,
+  legacyEmptyFileOrConditions,
+} from "@/lib/empty-file-sync";
+import { migrateLegacyEmptyFailedToWarnings } from "@/lib/retry-failed-sync";
 
 const ACTIVE_STATUSES: ScanJobStatus[] = [
   ScanJobStatus.PENDING,
@@ -29,8 +35,9 @@ export async function GET() {
   const { error } = await requireAdminApi();
   if (error) return error;
 
-  const maxRetries = ingestMaxRetries();
-  const [settings, health, credsUsers, activeJobs, recentJobs, pipelineGlobal, embedPending] =
+  await migrateLegacyEmptyFailedToWarnings();
+
+  const [settings, health, credsUsers, activeJobs, recentJobs, pipelineGlobal, embedPending, failedByError, emptyWarnings] =
     await Promise.all([
       getAutoScanSettings(),
       getScanHealth(),
@@ -60,6 +67,17 @@ export async function GET() {
           chunks: { none: {} },
         },
       }),
+      prisma.syncFile.groupBy({
+        by: ["errorMessage"],
+        where: {
+          syncStatus: SyncStatus.FAILED,
+          NOT: { OR: legacyEmptyFileOrConditions() },
+        },
+        _count: { _all: true },
+      }),
+      prisma.syncFile.count({
+        where: emptyFileWarningWhere(),
+      }),
     ]);
 
   const pipelineMap: Record<string, number> = {};
@@ -82,6 +100,7 @@ export async function GET() {
         ocrPending,
         downloading,
         failed,
+        warnings,
         failedRetryable,
         failedExhausted,
         activeJob,
@@ -106,20 +125,29 @@ export async function GET() {
             },
           }),
           prisma.syncFile.count({
-            where: { userId: u.id, syncStatus: SyncStatus.FAILED },
+            where: {
+              userId: u.id,
+              syncStatus: SyncStatus.FAILED,
+              NOT: { OR: legacyEmptyFileOrConditions() },
+            },
+          }),
+          prisma.syncFile.count({
+            where: { userId: u.id, ...emptyFileWarningWhere() },
           }),
           prisma.syncFile.count({
             where: {
               userId: u.id,
               syncStatus: SyncStatus.FAILED,
-              ingestRetryCount: { lt: maxRetries },
+              ingestRetryCount: 1,
+              NOT: { OR: legacyEmptyFileOrConditions() },
             },
           }),
           prisma.syncFile.count({
             where: {
               userId: u.id,
               syncStatus: SyncStatus.FAILED,
-              ingestRetryCount: { gte: maxRetries },
+              ingestRetryCount: { gte: 2 },
+              NOT: { OR: legacyEmptyFileOrConditions() },
             },
           }),
           prisma.scanJob.findFirst({
@@ -152,9 +180,9 @@ export async function GET() {
         ocrPending,
         downloading,
         failed,
+        warnings,
         failedRetryable,
         failedExhausted,
-        scanLockHeld: health.userLocks.includes(u.id),
         activeJob: activeJob
           ? {
               ...activeJob,
@@ -177,6 +205,7 @@ export async function GET() {
   );
 
   const batchSize = syncBatchSize();
+  const retryableFailed = failedByError.reduce((n, row) => n + row._count._all, 0);
 
   return NextResponse.json({
     at: new Date().toISOString(),
@@ -184,13 +213,27 @@ export async function GET() {
     batchSize,
     batchUnlimited: batchSize === 0,
     credsUserCount: usersWithCreds.length,
+    emptyFileWarning: {
+      message:
+        "Peringatan: file kosong (0 byte). Tidak bisa di-OCR. Perbaiki atau ganti file di Cloud Bappenas.",
+      count: emptyWarnings,
+    },
+    failedBreakdown: [...failedByError]
+      .filter((row) => !isEmptyFileWarningMessage(row.errorMessage))
+      .sort((a, b) => b._count._all - a._count._all)
+      .slice(0, 8)
+      .map((row) => ({
+        errorMessage: row.errorMessage ?? "Unknown",
+        count: row._count._all,
+      })),
     pipeline: {
       ocrDone: pipelineMap.OCR_DONE ?? 0,
       ocrPending: pipelineMap.OCR_PENDING ?? 0,
       queued: pipelineMap.QUEUED ?? 0,
       downloading: pipelineMap.DOWNLOADING ?? 0,
       discovered: pipelineMap.DISCOVERED ?? 0,
-      failed: pipelineMap.FAILED ?? 0,
+      failed: retryableFailed,
+      warnings: emptyWarnings,
       skipped: pipelineMap.SKIPPED ?? 0,
       deleted: pipelineMap.DELETED ?? 0,
       embedPending,

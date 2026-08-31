@@ -1,10 +1,22 @@
 import { SyncStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 
-/** Max auto-retry attempts for FAILED files (manual retry still allowed). */
+/** Legacy cap (UI labels). Manual retry is not limited by this. */
 export function ingestMaxRetries(): number {
   const n = Number(process.env.INGEST_MAX_RETRY_COUNT ?? "5");
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+}
+
+/** How many times worker auto-retry schedule may pick a FAILED file (default 1). */
+export function ingestAutoRetryMax(): number {
+  const n = Number(process.env.INGEST_AUTO_RETRY_MAX ?? "1");
+  if (!Number.isFinite(n) || n < 0) return 1;
+  return Math.floor(n);
+}
+
+/** FAILED with ingestRetryCount=1: failed once, eligible for one auto-retry. */
+export function isEligibleForAutoRetry(ingestRetryCount: number): boolean {
+  return ingestRetryCount === 1;
 }
 
 export async function markSyncFileFailed(

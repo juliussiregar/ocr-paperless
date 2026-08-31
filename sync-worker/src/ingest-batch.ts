@@ -21,16 +21,11 @@ import {
 } from "./sync-job-helpers.js";
 import { invalidateAfterScanJob } from "./listing-cache.js";
 import { markSyncFileFailed } from "./sync-fail.js";
-
-const EMPTY_CONTENT_HASH =
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-const EMPTY_FILE_ERROR =
-  "File kosong (0 byte). Tidak bisa di-OCR. Periksa atau ganti file di Cloud Bappenas.";
-
-function isEmptyDownload(size: number, hash: string): boolean {
-  return size === 0 || hash === EMPTY_CONTENT_HASH;
-}
+import {
+  EMPTY_CONTENT_HASH,
+  emptyFileSkippedPatch,
+  isEmptyDownload,
+} from "./empty-file.js";
 
 async function withRetries<T>(
   fn: () => Promise<T>,
@@ -280,15 +275,13 @@ export async function runIngestPathsForJob(
         await prisma.syncFile.update({
           where: { userId_remotePath: { userId, remotePath } },
           data: {
-            contentHash: hash,
-            fileSize: BigInt(0),
-            syncStatus: SyncStatus.FAILED,
-            errorMessage: EMPTY_FILE_ERROR,
-            ocrPendingAt: null,
-            ingestRetryCount: { increment: 1 },
+            ...emptyFileSkippedPatch({
+              contentHash: hash,
+              fileSize: BigInt(0),
+            }),
           },
         });
-        failed++;
+        skipped++;
         processed++;
         await bumpJobProgress();
         return;

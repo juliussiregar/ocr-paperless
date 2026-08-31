@@ -82,6 +82,21 @@ remote_deploy() {
     sleep 3
   done
 
+  echo "==> migrate legacy empty FAILED to SKIPPED warnings"
+  PGUSER="$(grep '^POSTGRES_USER=' .env | cut -d= -f2- | tr -d '\r')"
+  docker compose exec -T postgres psql -U "$PGUSER" -d app <<'SQL'
+UPDATE sync_files
+SET sync_status = 'SKIPPED',
+    error_message = 'Peringatan: file kosong (0 byte). Tidak bisa di-OCR. Perbaiki atau ganti file di Cloud Bappenas.',
+    ocr_pending_at = NULL
+WHERE sync_status = 'FAILED'
+  AND (
+    file_size = 0
+    OR error_message ILIKE '%file kosong%'
+    OR error_message ILIKE '%0 byte%'
+  );
+SQL
+
   echo "==> final health"
   for _ in $(seq 1 40); do
     if curl -sf "http://127.0.0.1:${APP_PORT:-3002}/api/health" >/dev/null; then

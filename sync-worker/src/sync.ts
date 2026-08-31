@@ -17,26 +17,16 @@ import {
   markSyncFileFailed,
   markSyncFileFailedById,
 } from "./sync-fail.js";
+import {
+  EMPTY_CONTENT_HASH,
+  emptyFileSkippedPatch,
+  isEmptyDownload,
+  isEmptyRemoteSize,
+} from "./empty-file.js";
 
 function stuckSyncMinutes(): number {
   const n = Number(process.env.STUCK_SYNC_MINUTES ?? "60");
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60;
-}
-
-/** SHA-256 of empty content; never submit these to Paperless OCR. */
-const EMPTY_CONTENT_HASH =
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-const EMPTY_FILE_ERROR =
-  "File kosong (0 byte). Tidak bisa di-OCR. Periksa atau ganti file di Cloud Bappenas.";
-
-function isEmptyRemoteSize(size: number | bigint | null | undefined): boolean {
-  if (size == null) return false;
-  return Number(size) === 0;
-}
-
-function isEmptyDownload(size: number, hash: string): boolean {
-  return size === 0 || hash === EMPTY_CONTENT_HASH;
 }
 
 function normalizeFavoritePath(path: string): string {
@@ -665,20 +655,16 @@ async function runFullScanJob(jobId: string): Promise<void> {
               lastModified: remote.lastModified,
               fileSize: BigInt(0),
               mimeType: remote.mimeType,
-              syncStatus: SyncStatus.FAILED,
-              errorMessage: EMPTY_FILE_ERROR,
+              ...emptyFileSkippedPatch(),
             },
             update: {
               etag: remote.etag,
               lastModified: remote.lastModified,
               fileSize: BigInt(0),
-              syncStatus: SyncStatus.FAILED,
-              errorMessage: EMPTY_FILE_ERROR,
-              ocrPendingAt: null,
-              ingestRetryCount: { increment: 1 },
+              ...emptyFileSkippedPatch(),
             },
           });
-          failed++;
+          skipped++;
           await prisma.scanJob.update({
             where: { id: jobId },
             data: { processedFiles: ++processed, failedFiles: failed },
@@ -738,16 +724,13 @@ async function runFullScanJob(jobId: string): Promise<void> {
             data: {
               contentHash: hash,
               fileSize: BigInt(0),
-              syncStatus: SyncStatus.FAILED,
-              errorMessage: EMPTY_FILE_ERROR,
-              ocrPendingAt: null,
-              ingestRetryCount: { increment: 1 },
+              ...emptyFileSkippedPatch(),
             },
           });
-          failed++;
+          skipped++;
           await prisma.scanJob.update({
             where: { id: jobId },
-            data: { processedFiles: ++processed, failedFiles: failed },
+            data: { processedFiles: ++processed, skippedFiles: skipped },
           });
           continue;
         }
@@ -941,8 +924,13 @@ export async function reconcileOcrStatus(): Promise<{
       isEmptyRemoteSize(file.fileSize) ||
       file.contentHash === EMPTY_CONTENT_HASH
     ) {
-      await markSyncFileFailedById(file.id, EMPTY_FILE_ERROR);
-      // Counted as failed empty stub, not OCR timeout
+      await prisma.syncFile.update({
+        where: { id: file.id },
+        data: emptyFileSkippedPatch({
+          contentHash: file.contentHash ?? EMPTY_CONTENT_HASH,
+          fileSize: file.fileSize ?? BigInt(0),
+        }),
+      });
       continue;
     }
 

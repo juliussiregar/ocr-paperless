@@ -10,17 +10,23 @@ import { SYNC_ROOT_PATH, syncBatchSize } from "@/lib/sync-defaults";
 import { getUserBappenasCreds, listUsersWithBappenasCreds } from "@/lib/bappenas";
 import { getScanHealth, releaseUserScanLock } from "@/lib/scan-health";
 import { triggerDeltaSyncForAllUsers } from "@/lib/admin-sync-trigger";
+import {
+  retryFailedFilesForAllUsers,
+  retryFailedFilesForUser,
+} from "@/lib/retry-failed-sync";
 
-function ingestMaxRetries(): number {
-  const n = Number(process.env.INGEST_MAX_RETRY_COUNT ?? "5");
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+function autoRetryEligibleWhere() {
+  return { ingestRetryCount: 1 };
+}
+
+function autoRetryExhaustedWhere() {
+  return { ingestRetryCount: { gte: 2 } };
 }
 
 export async function GET() {
   const { error } = await requireAdminApi();
   if (error) return error;
 
-  const maxRetries = ingestMaxRetries();
   const credsUserIds = new Set(
     (await listUsersWithBappenasCreds()).map((u) => u.id)
   );
@@ -51,14 +57,14 @@ export async function GET() {
             where: {
               userId: u.id,
               syncStatus: SyncStatus.FAILED,
-              ingestRetryCount: { lt: maxRetries },
+              ...autoRetryEligibleWhere(),
             },
           }),
           prisma.syncFile.count({
             where: {
               userId: u.id,
               syncStatus: SyncStatus.FAILED,
-              ingestRetryCount: { gte: maxRetries },
+              ...autoRetryExhaustedWhere(),
             },
           }),
           prisma.syncFile.count({
@@ -198,6 +204,49 @@ export async function POST(request: NextRequest) {
       released,
     });
     return NextResponse.json({ ok: true, released });
+  }
+
+  if (body.action === "retryFailed") {
+    const allUsers = body.allUsers === true;
+    const targetUserId =
+      typeof body.userId === "string" ? body.userId : "";
+
+    if (allUsers) {
+      const credsUsers = await listUsersWithBappenasCreds();
+      const result = await retryFailedFilesForAllUsers(credsUsers.map((u) => u.id));
+      await writeAudit("admin.scan.retry_failed", session!.user.id, {
+        allUsers: true,
+        enqueued: result.enqueued.length,
+        skipped: result.skipped.length,
+      });
+      return NextResponse.json({ ok: true, ...result });
+    }
+
+    if (!targetUserId) {
+      return NextResponse.json({ error: "userId wajib" }, { status: 400 });
+    }
+
+    const creds = await getUserBappenasCreds(targetUserId);
+    if (!creds) {
+      return NextResponse.json(
+        { error: "User tidak punya kredensial Bappenas yang valid" },
+        { status: 400 }
+      );
+    }
+
+    try {
+      const result = await retryFailedFilesForUser(targetUserId);
+      await writeAudit("admin.scan.retry_failed", session!.user.id, {
+        targetUserId,
+        jobId: result.jobId,
+        totalFiles: result.totalFiles,
+      });
+      return NextResponse.json({ ok: true, ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Gagal retry failed";
+      const status = message.startsWith("Job aktif") ? 409 : 400;
+      return NextResponse.json({ error: message }, { status });
+    }
   }
 
   if (body.action === "triggerAll") {

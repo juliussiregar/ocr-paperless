@@ -2,7 +2,8 @@ import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { enqueueScanJob } from "./scan-queues.js";
 import { hasActiveScanJobForUser } from "./sync.js";
-import { ingestMaxRetries } from "./sync-fail.js";
+import { ingestAutoRetryMax } from "./sync-fail.js";
+import { legacyEmptyFileOrConditions } from "./empty-file.js";
 import {
   AUTO_RETRY_BATCH_SIZE,
   AUTO_RETRY_INTERVAL_MINUTES,
@@ -61,7 +62,7 @@ export async function maybeAutoRetryFailed(): Promise<void> {
   await setSetting(SETTING_AUTO_RETRY_LAST_RUN_AT, new Date().toISOString());
 
   const batch = await retryBatchSize();
-  const maxRetries = ingestMaxRetries();
+  const autoMax = ingestAutoRetryMax();
   const users = await prisma.user.findMany({ select: { id: true, email: true } });
   let enqueued = 0;
 
@@ -72,7 +73,10 @@ export async function maybeAutoRetryFailed(): Promise<void> {
       where: {
         userId: user.id,
         syncStatus: "FAILED",
-        ingestRetryCount: { lt: maxRetries },
+        NOT: { OR: legacyEmptyFileOrConditions() },
+        ...(autoMax === 0
+          ? {}
+          : { ingestRetryCount: 1 }),
       },
       select: { remotePath: true },
       take: batch,
