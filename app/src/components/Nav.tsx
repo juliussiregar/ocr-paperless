@@ -10,6 +10,7 @@ import {
   UserCircle,
   Settings,
   LogOut,
+  Radio,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -26,14 +27,23 @@ export function Nav({ user }: NavProps) {
     { href: "/cloud", label: "Library", icon: Library },
     { href: "/profile", label: "Akun", icon: UserCircle },
     ...(user.role === "ADMIN"
-      ? [{ href: "/admin", label: "Admin", icon: Settings }]
+      ? [
+          { href: "/admin", label: "Admin", icon: Settings },
+          { href: "/admin/sync", label: "Sync log", icon: Radio },
+        ]
       : []),
   ];
 
   function isActive(href: string) {
     if (href === "/") return pathname === "/" || pathname === "/ask";
+    if (href === "/admin/sync") {
+      return pathname === "/admin/sync" || pathname.startsWith("/admin/sync/");
+    }
     if (href === "/admin") {
-      return pathname === "/admin" || pathname.startsWith("/admin/");
+      return (
+        pathname === "/admin" ||
+        (pathname.startsWith("/admin/") && !pathname.startsWith("/admin/sync"))
+      );
     }
     return pathname === href || pathname.startsWith(`${href}/`);
   }

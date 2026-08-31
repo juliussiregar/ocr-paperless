@@ -20,7 +20,7 @@ const tabs = [
   },
   {
     href: "/admin/sync",
-    label: "Sync live",
+    label: "Sync log",
     icon: Radio,
     exact: false,
   },

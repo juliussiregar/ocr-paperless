@@ -28,7 +28,7 @@ export function AdminPanel() {
             href="/admin/sync"
             className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700"
           >
-            Buka Sync live
+            Buka Sync log
           </Link>
         </div>
       </Card>

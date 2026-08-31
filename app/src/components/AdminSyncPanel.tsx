@@ -379,35 +379,23 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold text-slate-900">Sync live</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Tahapan pipeline, job aktif, dan riwayat. Diperbarui otomatis tiap{" "}
-            {POLL_MS / 1000}s.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1",
-              pollError
-                ? "bg-red-50 text-red-700"
-                : "bg-teal-50 text-teal-700"
-            )}
-          >
-            <Radio
-              size={12}
-              className={cn(!pollError && "animate-pulse")}
-            />
-            {pollError ? pollError : "Live"}
-          </span>
-          {live?.at && (
-            <span>
-              {new Date(live.at).toLocaleTimeString("id-ID")}
-            </span>
+      <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-slate-500">
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1",
+            pollError ? "bg-red-50 text-red-700" : "bg-teal-50 text-teal-700"
           )}
-        </div>
+        >
+          <Radio
+            size={12}
+            className={cn(!pollError && "animate-pulse")}
+          />
+          {pollError ? pollError : "Live"}
+        </span>
+        {live?.at && (
+          <span>Update {new Date(live.at).toLocaleTimeString("id-ID")}</span>
+        )}
+        <span className="text-slate-400">poll {POLL_MS / 1000}s</span>
       </div>
 
       <Card className="!p-0 overflow-hidden">
