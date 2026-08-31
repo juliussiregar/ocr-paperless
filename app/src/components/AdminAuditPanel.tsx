@@ -35,6 +35,8 @@ type AuditStats = {
   activeUsers: number;
   errors: number;
   openai: {
+    lifetime?: AiUsageBlock;
+    period?: AiUsageBlock;
     hits: number;
     events: number;
     sampledEvents?: number;
@@ -53,6 +55,28 @@ type AuditStats = {
     category: string;
   }>;
 };
+
+type AiUsageBlock = {
+  hits: number;
+  events: number;
+  embeddingHits: number;
+  promptTokens: number;
+  completionTokens: number;
+  embeddingTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+};
+
+const AUDIT_RANGE_KEY = "admin-audit-range";
+
+function readStoredRange(): AuditRange {
+  if (typeof window === "undefined") return "30d";
+  const saved = localStorage.getItem(AUDIT_RANGE_KEY);
+  if (saved === "today" || saved === "7d" || saved === "30d" || saved === "90d") {
+    return saved;
+  }
+  return "30d";
+}
 
 const RANGE_OPTIONS: { id: AuditRange; label: string }[] = [
   { id: "today", label: "Hari ini" },
@@ -107,7 +131,8 @@ function categoryTone(category: string, isError: boolean): string {
 }
 
 export function AdminAuditPanel() {
-  const [range, setRange] = useState<AuditRange>("today");
+  const [range, setRange] = useState<AuditRange>("30d");
+  const [rangeReady, setRangeReady] = useState(false);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [actionFilter, setActionFilter] = useState("");
   const [page, setPage] = useState(1);
@@ -119,6 +144,11 @@ export function AdminAuditPanel() {
   const [hasMore, setHasMore] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [since, setSince] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRange(readStoredRange());
+    setRangeReady(true);
+  }, []);
 
   const load = useCallback(
     async (opts: { page: number; append: boolean }) => {
@@ -164,10 +194,13 @@ export function AdminAuditPanel() {
   );
 
   useEffect(() => {
+    if (!rangeReady) return;
     void load({ page: 1, append: false });
-  }, [load]);
+  }, [load, rangeReady]);
 
   const openai = stats?.openai;
+  const lifetime = openai?.lifetime;
+  const period = openai?.period ?? openai;
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
@@ -211,6 +244,7 @@ export function AdminAuditPanel() {
               onClick={() => {
                 setRange(opt.id);
                 setPage(1);
+                localStorage.setItem(AUDIT_RANGE_KEY, opt.id);
               }}
               className={cn(
                 "rounded-full px-3.5 py-1.5 text-xs font-semibold transition",
@@ -234,37 +268,46 @@ export function AdminAuditPanel() {
           <div className="rounded-xl bg-slate-900 px-4 py-4 text-white shadow-md">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/50">
-                Perkiraan biaya OpenAI
+                Total biaya OpenAI
               </p>
               <DollarSign size={16} className="text-teal-300" />
             </div>
             <p className="mt-2 font-mono text-2xl font-semibold tracking-tight">
-              {loading && !openai ? "..." : formatUsd(openai?.estimatedCostUsd ?? 0)}
+              {loading && !stats
+                ? "..."
+                : formatUsd(lifetime?.estimatedCostUsd ?? 0)}
             </p>
             <p className="mt-1 text-[11px] text-white/45">
-              Estimasi dari token chat + embedding (bukan invoice)
+              Akumulasi sejak awal (tidak reset per hari)
             </p>
+            {period && (
+              <p className="mt-2 text-[11px] text-teal-200/80">
+                Periode dipilih: {formatUsd(period.estimatedCostUsd)}
+              </p>
+            )}
           </div>
 
           <div className="rounded-xl bg-white px-4 py-4 ring-1 ring-slate-200/80">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                Hit OpenAI
+                Hit OpenAI (total)
               </p>
               <Sparkles size={16} className="text-teal-600" />
             </div>
             <p className="mt-2 text-2xl font-semibold text-slate-900">
-              {(openai?.hits ?? 0).toLocaleString("id-ID")}
+              {(lifetime?.hits ?? 0).toLocaleString("id-ID")}
             </p>
             <p className="mt-1 text-[11px] text-slate-500">
-              Ask AI · {formatTokens(openai?.totalTokens ?? 0)} token
-              {(openai?.embeddingHits ?? 0) > 0
-                ? ` · ${openai!.embeddingHits} embed`
-                : ""}
-              {openai?.partial
-                ? " · estimasi sebagian (sampel terbaru)"
+              {formatTokens(lifetime?.totalTokens ?? 0)} token total
+              {(lifetime?.embeddingHits ?? 0) > 0
+                ? ` · ${lifetime!.embeddingHits} embed`
                 : ""}
             </p>
+            {period && (
+              <p className="mt-1 text-[11px] text-slate-400">
+                Periode: {period.hits} hit · {formatTokens(period.totalTokens)} token
+              </p>
+            )}
           </div>
 
           <div className="rounded-xl bg-white px-4 py-4 ring-1 ring-slate-200/80">

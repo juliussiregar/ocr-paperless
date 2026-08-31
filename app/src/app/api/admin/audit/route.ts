@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminApi } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import {
-  estimateCostUsd,
-  usageFromAuditMeta,
-} from "@/lib/openai-pricing";
+  aggregateAiUsageSince,
+  getLifetimeAiUsage,
+} from "@/lib/ai-usage-aggregate";
 import { describeAuditAction, isErrorAction } from "@/lib/audit-labels";
 
 export type AuditRange = "today" | "7d" | "30d" | "90d";
@@ -49,7 +49,8 @@ function metaSummary(
   if (typeof meta.email === "string") return String(meta.email);
   if (typeof meta.remotePath === "string") return String(meta.remotePath);
   if (typeof meta.docId === "number") return `Dokumen #${meta.docId}`;
-  if (typeof meta.jobId === "string") return `Job ${String(meta.jobId).slice(0, 8)}...`;
+  if (typeof meta.jobId === "string")
+    return `Job ${String(meta.jobId).slice(0, 8)}...`;
   if (action.startsWith("settings.") && meta.autoScanEnabled != null) {
     return meta.autoScanEnabled ? "Auto scan ON" : "Auto scan OFF";
   }
@@ -61,9 +62,9 @@ export async function GET(request: NextRequest) {
   if (error) return error;
 
   const sp = request.nextUrl.searchParams;
-  const range = (sp.get("range") ?? "today") as AuditRange;
+  const range = (sp.get("range") ?? "30d") as AuditRange;
   const validRanges: AuditRange[] = ["today", "7d", "30d", "90d"];
-  const safeRange = validRanges.includes(range) ? range : "today";
+  const safeRange = validRanges.includes(range) ? range : "30d";
   const since = rangeToSince(safeRange);
 
   const page = Math.max(1, Number(sp.get("page") ?? "1") || 1);
@@ -89,8 +90,7 @@ export async function GET(request: NextRequest) {
     whereFinal.action = actionFilter;
   }
 
-  const OPENAI_STATS_CAP = 5000;
-  const [filteredTotal, eventsTotal, rows, actionGroups, activeUsers, errorCount, openaiAskCount, openaiRows] =
+  const [filteredTotal, eventsTotal, rows, actionGroups, activeUsers, errorCount, periodOpenAi, lifetimeOpenAi] =
     await Promise.all([
       prisma.auditLog.count({ where: whereFinal }),
       prisma.auditLog.count({ where: { createdAt: { gte: since } } }),
@@ -124,58 +124,9 @@ export async function GET(request: NextRequest) {
           action: { startsWith: "error." },
         },
       }),
-      prisma.auditLog.count({
-        where: {
-          createdAt: { gte: since },
-          action: "chat.ask",
-        },
-      }),
-      prisma.auditLog.findMany({
-        where: {
-          createdAt: { gte: since },
-          action: "chat.ask",
-        },
-        orderBy: { createdAt: "desc" },
-        select: { action: true, meta: true },
-        take: OPENAI_STATS_CAP,
-      }),
+      aggregateAiUsageSince(since),
+      getLifetimeAiUsage(),
     ]);
-
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let embeddingTokens = 0;
-  let embeddingHits = 0;
-  let chatHits = 0;
-  let costUsd = 0;
-
-  for (const row of openaiRows) {
-    const meta = parseMeta(row.meta);
-    const u = usageFromAuditMeta(meta);
-    const rowChat = u.chatHits ?? 0;
-    const rowEmbed = u.embeddingHits ?? 0;
-    const prompt = u.promptTokens ?? 0;
-    const completion = u.completionTokens ?? 0;
-    const embedTok = u.embeddingTokens ?? 0;
-
-    if (rowChat > 0) chatHits += rowChat;
-    else if (prompt > 0 || completion > 0) chatHits += 1;
-
-    promptTokens += prompt;
-    completionTokens += completion;
-    embeddingTokens += embedTok;
-    embeddingHits += rowEmbed;
-    if (typeof u.estimatedCostUsd === "number" && u.estimatedCostUsd > 0) {
-      costUsd += u.estimatedCostUsd;
-    } else {
-      costUsd += estimateCostUsd({
-        promptTokens: prompt,
-        completionTokens: completion,
-        embeddingTokens: embedTok,
-      });
-    }
-  }
-
-  const openaiPartial = openaiAskCount > openaiRows.length;
 
   const logs = rows.map((r) => {
     const meta = parseMeta(r.meta);
@@ -208,16 +159,18 @@ export async function GET(request: NextRequest) {
       activeUsers: activeUsers.length,
       errors: errorCount,
       openai: {
-        hits: chatHits,
-        events: openaiAskCount,
-        sampledEvents: openaiRows.length,
-        partial: openaiPartial,
-        embeddingHits,
-        promptTokens,
-        completionTokens,
-        embeddingTokens,
-        totalTokens: promptTokens + completionTokens + embeddingTokens,
-        estimatedCostUsd: costUsd,
+        lifetime: lifetimeOpenAi,
+        period: periodOpenAi,
+        // Legacy fields = period (for older clients)
+        hits: periodOpenAi.hits,
+        events: periodOpenAi.events,
+        embeddingHits: periodOpenAi.embeddingHits,
+        promptTokens: periodOpenAi.promptTokens,
+        completionTokens: periodOpenAi.completionTokens,
+        embeddingTokens: periodOpenAi.embeddingTokens,
+        totalTokens: periodOpenAi.totalTokens,
+        estimatedCostUsd: periodOpenAi.estimatedCostUsd,
+        partial: false,
       },
       byAction: actionGroups.map((g) => ({
         action: g.action,

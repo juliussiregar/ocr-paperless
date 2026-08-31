@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { incrementAiUsageFromMeta, isAiAuditAction } from "./ai-usage-aggregate";
 
 export async function writeAudit(
   action: string,
@@ -13,6 +14,9 @@ export async function writeAudit(
         meta: meta ? JSON.stringify(meta) : null,
       },
     });
+    if (isAiAuditAction(action)) {
+      await incrementAiUsageFromMeta(meta);
+    }
   } catch (err) {
     console.error("[audit]", err);
   }
