@@ -54,7 +54,7 @@ export type ScanHealth = {
   };
 };
 
-function ingestMaxRetries(): number {
+export function ingestMaxRetries(): number {
   const n = Number(process.env.INGEST_MAX_RETRY_COUNT ?? "5");
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
 }
@@ -190,13 +190,13 @@ export async function getScanHealth(): Promise<ScanHealth> {
       count: r._count._all,
     })),
     throughput: {
-      scanMaxFiles: numEnv("SCAN_MAX_FILES", 100),
-      discoverConcurrency: numEnv("SCAN_DISCOVER_CONCURRENCY", 4),
-      ingestConcurrency: numEnv("SCAN_INGEST_CONCURRENCY", 4),
-      webdavDiscoveryConcurrency: numEnv("WEBDAV_DISCOVERY_CONCURRENCY", 24),
-      webdavDownloadConcurrency: numEnv("WEBDAV_DOWNLOAD_CONCURRENCY", 4),
-      ocrReconcileIntervalMs: numEnv("OCR_RECONCILE_INTERVAL_MS", 15000),
-      embedBackfillBatch: numEnv("EMBED_BACKFILL_BATCH", 15),
+      scanMaxFiles: numEnv("SCAN_MAX_FILES", 750),
+      discoverConcurrency: numEnv("SCAN_DISCOVER_CONCURRENCY", 8),
+      ingestConcurrency: numEnv("SCAN_INGEST_CONCURRENCY", 8),
+      webdavDiscoveryConcurrency: numEnv("WEBDAV_DISCOVERY_CONCURRENCY", 32),
+      webdavDownloadConcurrency: numEnv("WEBDAV_DOWNLOAD_CONCURRENCY", 10),
+      ocrReconcileIntervalMs: numEnv("OCR_RECONCILE_INTERVAL_MS", 5000),
+      embedBackfillBatch: numEnv("EMBED_BACKFILL_BATCH", 35),
       postSyncWarmEnabled:
         (process.env.POST_SYNC_WARM_ENABLED ?? "true") !== "false",
       postSyncWarmMaxDirs: numEnv("POST_SYNC_WARM_MAX_DIRS", 16),

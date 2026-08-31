@@ -8,10 +8,10 @@ export const AUTO_RETRY_BATCH_SIZE = 30;
 /** No practical cap for unlimited ingest runs. */
 export const SYNC_NO_LIMIT = Number.MAX_SAFE_INTEGER;
 
-/** 0 = process all files in one run (no batch cap). */
+/** 0 = unlimited single run; default 750 per batch (chained until done). */
 export function syncBatchSize(): number {
-  const n = Number(process.env.SCAN_MAX_FILES ?? "0");
-  if (!Number.isFinite(n) || n < 0) return 0;
+  const n = Number(process.env.SCAN_MAX_FILES ?? "750");
+  if (!Number.isFinite(n) || n < 0) return 750;
   return Math.floor(n);
 }
 

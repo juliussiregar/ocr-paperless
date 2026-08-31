@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Users } from "lucide-react";
+import { BarChart3, Radio, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const tabs = [
@@ -16,6 +16,12 @@ const tabs = [
     href: "/admin/users",
     label: "User",
     icon: Users,
+    exact: false,
+  },
+  {
+    href: "/admin/sync",
+    label: "Sync live",
+    icon: Radio,
     exact: false,
   },
 ];

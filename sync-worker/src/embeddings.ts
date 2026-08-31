@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { getPaperlessDocumentContent } from "./paperless.js";
 
@@ -6,6 +7,33 @@ const CHUNK_SIZE = envChunkSize();
 const CHUNK_OVERLAP = envChunkOverlap();
 const EMBED_BATCH = 32;
 const BACKFILL_BATCH = Number(process.env.EMBED_BACKFILL_BATCH ?? "15") || 15;
+const EMBED_TX_TIMEOUT_MS = Number(process.env.EMBED_TX_TIMEOUT_MS ?? "60000") || 60000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pauseEmbedDuringIngest(): boolean {
+  return (process.env.EMBED_PAUSE_DURING_INGEST ?? "true") !== "false";
+}
+
+/** Skip backfill while bulk ingest is running (reduces OpenAI 429 + DB load). */
+async function isBulkIngestActive(): Promise<boolean> {
+  if (!pauseEmbedDuringIngest()) return false;
+  const n = await prisma.scanJob.count({
+    where: {
+      jobType: "ingest_paths",
+      status: {
+        in: [
+          ScanJobStatus.PENDING,
+          ScanJobStatus.RUNNING,
+          ScanJobStatus.PAUSED,
+        ],
+      },
+    },
+  });
+  return n > 0;
+}
 
 function envChunkSize(): number {
   const n = Number(process.env.ASK_CHUNK_SIZE ?? "1500");
@@ -61,26 +89,46 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
   const out: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
-    const res = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: embeddingModel(),
-        input: batch,
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Embedding API ${res.status}: ${body.slice(0, 200)}`);
+    let lastErr: Error | null = null;
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const res = await fetch("https://api.openai.com/v1/embeddings", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: embeddingModel(),
+          input: batch,
+        }),
+      });
+
+      if (res.status === 429) {
+        const waitMs = Math.min(90_000, 8_000 * 2 ** attempt);
+        console.warn(
+          `[embed] rate limited (429), retry in ${Math.round(waitMs / 1000)}s`
+        );
+        await sleep(waitMs);
+        lastErr = new Error(`Embedding API 429 (attempt ${attempt + 1})`);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`Embedding API ${res.status}: ${body.slice(0, 200)}`);
+      }
+
+      const data = (await res.json()) as {
+        data: Array<{ embedding: number[]; index: number }>;
+      };
+      const sorted = [...data.data].sort((a, b) => a.index - b.index);
+      for (const row of sorted) out.push(row.embedding);
+      lastErr = null;
+      break;
     }
-    const data = (await res.json()) as {
-      data: Array<{ embedding: number[]; index: number }>;
-    };
-    const sorted = [...data.data].sort((a, b) => a.index - b.index);
-    for (const row of sorted) out.push(row.embedding);
+
+    if (lastErr) throw lastErr;
   }
   return out;
 }
@@ -120,28 +168,31 @@ async function cloneChunksFromPeer(opts: {
   });
   if (peerChunks.length === 0) return 0;
 
-  await prisma.$transaction(async (tx) => {
-    await tx.documentChunk.deleteMany({
-      where: {
-        userId: opts.userId,
-        paperlessDocumentId: opts.paperlessDocumentId,
-      },
-    });
-    for (const c of peerChunks) {
-      await tx.documentChunk.create({
-        data: {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.documentChunk.deleteMany({
+        where: {
           userId: opts.userId,
-          syncFileId: opts.syncFileId,
           paperlessDocumentId: opts.paperlessDocumentId,
-          chunkIndex: c.chunkIndex,
-          content: c.content,
-          embedding: c.embedding as object,
-          tokenEstimate: c.tokenEstimate,
-          contentHash: c.contentHash,
         },
       });
-    }
-  });
+      for (const c of peerChunks) {
+        await tx.documentChunk.create({
+          data: {
+            userId: opts.userId,
+            syncFileId: opts.syncFileId,
+            paperlessDocumentId: opts.paperlessDocumentId,
+            chunkIndex: c.chunkIndex,
+            content: c.content,
+            embedding: c.embedding as object,
+            tokenEstimate: c.tokenEstimate,
+            contentHash: c.contentHash,
+          },
+        });
+      }
+    },
+    { timeout: EMBED_TX_TIMEOUT_MS, maxWait: 15_000 }
+  );
 
   return peerChunks.length;
 }
@@ -190,28 +241,31 @@ export async function indexDocumentChunks(opts: {
     throw new Error("Embedding count mismatch");
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.documentChunk.deleteMany({
-      where: {
-        userId: opts.userId,
-        paperlessDocumentId: opts.paperlessDocumentId,
-      },
-    });
-    for (let i = 0; i < parts.length; i++) {
-      await tx.documentChunk.create({
-        data: {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.documentChunk.deleteMany({
+        where: {
           userId: opts.userId,
-          syncFileId: opts.syncFileId,
           paperlessDocumentId: opts.paperlessDocumentId,
-          chunkIndex: i,
-          content: parts[i]!,
-          embedding: embeddings[i]!,
-          tokenEstimate: estimateTokens(parts[i]!),
-          contentHash,
         },
       });
-    }
-  });
+      for (let i = 0; i < parts.length; i++) {
+        await tx.documentChunk.create({
+          data: {
+            userId: opts.userId,
+            syncFileId: opts.syncFileId,
+            paperlessDocumentId: opts.paperlessDocumentId,
+            chunkIndex: i,
+            content: parts[i]!,
+            embedding: embeddings[i]!,
+            tokenEstimate: estimateTokens(parts[i]!),
+            contentHash,
+          },
+        });
+      }
+    },
+    { timeout: EMBED_TX_TIMEOUT_MS, maxWait: 15_000 }
+  );
 
   return { chunks: parts.length };
 }
@@ -219,6 +273,7 @@ export async function indexDocumentChunks(opts: {
 /** Backfill embeddings for OCR_DONE/SKIPPED files missing this user's chunks. */
 export async function backfillDocumentEmbeddings(): Promise<number> {
   if (!isConfigured()) return 0;
+  if (await isBulkIngestActive()) return 0;
 
   const done = await prisma.syncFile.findMany({
     where: {

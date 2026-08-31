@@ -69,8 +69,8 @@ fi
 mkdir -p paperless/consume paperless/export
 touch paperless/consume/.gitkeep paperless/export/.gitkeep
 
-# VPS kecil tanpa swap: saran (opsional, tidak dijalankan otomatis)
-if [[ "$(free -b | awk '/Mem:/{print $2}')" -lt 5000000000 ]]; then
+# VPS 8GB: swap warning hanya jika RAM host benar-benar kecil (<6GB)
+if [[ "$(free -b | awk '/Mem:/{print $2}')" -lt 6000000000 ]]; then
   if [[ "$(free -b | awk '/Swap:/{print $2}')" -eq 0 ]]; then
     echo "WARN: RAM <5GB dan Swap=0. OCR Paperless bisa OOM. Disarankan buat swap 2G:"
     echo "  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"

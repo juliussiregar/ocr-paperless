@@ -1,0 +1,900 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Activity,
+  Radio,
+  RefreshCw,
+  Server,
+} from "lucide-react";
+import { Card } from "@/components/ui/Card";
+import { cn } from "@/lib/utils";
+import { showToast } from "@/components/Toast";
+
+const POLL_MS = 2500;
+
+interface AutoScanSettings {
+  autoScanEnabled: boolean;
+  autoScanIntervalMinutes: number;
+  autoScanLastRunAt: string | null;
+}
+
+interface LiveJob {
+  id: string;
+  jobType: string;
+  status: string;
+  phase: string | null;
+  phaseLabel: string;
+  totalFiles: number;
+  processedFiles: number;
+  skippedFiles: number;
+  failedFiles: number;
+  newFiles: number;
+  currentFile: string | null;
+  errorMessage: string | null;
+  startedAt: string | null;
+  completedAt?: string | null;
+  createdAt?: string;
+  durationMs?: number | null;
+  progressPct: number | null;
+  user: { id?: string; email: string; name?: string | null } | null;
+}
+
+interface LiveUser {
+  userId: string;
+  email: string;
+  lastDiscoveryAt: string | null;
+  ocrDone: number;
+  ocrPending: number;
+  downloading: number;
+  failed: number;
+  failedRetryable: number;
+  failedExhausted: number;
+  scanLockHeld: boolean;
+  activeJob: {
+    id: string;
+    jobType: string;
+    status: string;
+    phase: string | null;
+    phaseLabel: string;
+    totalFiles: number;
+    processedFiles: number;
+    progressPct: number | null;
+    currentFile: string | null;
+    startedAt: string | null;
+    errorMessage: string | null;
+  } | null;
+}
+
+interface LiveHealth {
+  queues: {
+    discover: { waiting: number; active: number; delayed: number; failed: number };
+    ingest: { waiting: number; active: number; delayed: number; failed: number };
+  };
+  redis: { usedMemoryHuman: string; maxMemoryHuman: string };
+  stuckJobs: Array<{
+    id: string;
+    jobType: string;
+    phase: string | null;
+    currentFile: string | null;
+    startedAt: string;
+    userEmail: string | null;
+  }>;
+  userLocks: string[];
+  ingestMaxRetries: number;
+  failedExhaustedTotal: number;
+  pgJobCounts: Array<{ status: string; count: number }>;
+  throughput?: {
+    scanMaxFiles: number;
+    discoverConcurrency: number;
+    ingestConcurrency: number;
+    webdavDiscoveryConcurrency: number;
+    webdavDownloadConcurrency: number;
+    ocrReconcileIntervalMs: number;
+    embedBackfillBatch: number;
+    postSyncWarmEnabled: boolean;
+    postSyncWarmMaxDirs: number;
+  };
+}
+
+interface LivePayload {
+  at: string;
+  settings: AutoScanSettings;
+  batchSize: number;
+  batchUnlimited: boolean;
+  credsUserCount: number;
+  pipeline: {
+    ocrDone: number;
+    ocrPending: number;
+    queued: number;
+    downloading: number;
+    discovered: number;
+    failed: number;
+    skipped: number;
+    deleted: number;
+    embedPending: number;
+  };
+  health: LiveHealth;
+  activeJobs: LiveJob[];
+  recentJobs: LiveJob[];
+  users: LiveUser[];
+}
+
+type PipelineStage = "discover" | "download" | "ocr" | "embed" | "idle";
+
+function formatDurationMs(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return "-";
+  if (ms < 1000) return `${ms} ms`;
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return rem > 0 ? `${min}m ${rem}s` : `${min}m`;
+}
+
+function inferStage(data: LivePayload): PipelineStage {
+  const h = data.health;
+  const discoverBusy =
+    h.queues.discover.active > 0 ||
+    h.queues.discover.waiting > 0 ||
+    data.activeJobs.some(
+      (j) =>
+        j.jobType === "delta_sync" &&
+        j.status === "RUNNING" &&
+        (j.phase === "discovering" || j.phase === "starting")
+    );
+  if (discoverBusy) return "discover";
+
+  const downloadBusy =
+    h.queues.ingest.active > 0 ||
+    h.queues.ingest.waiting > 0 ||
+    data.pipeline.downloading > 0 ||
+    data.pipeline.discovered > 0 ||
+    data.activeJobs.some(
+      (j) =>
+        j.jobType === "ingest_paths" ||
+        j.phase === "downloading" ||
+        (j.jobType === "delta_sync" && j.phase === "downloading")
+    );
+  if (downloadBusy) return "download";
+
+  if (data.pipeline.ocrPending > 0 || data.pipeline.queued > 0) return "ocr";
+  if (data.pipeline.embedPending > 0) return "embed";
+  return "idle";
+}
+
+interface AdminSyncPanelProps {
+  initialSettings: AutoScanSettings;
+}
+
+export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
+  const [settings, setSettings] = useState(initialSettings);
+  const [live, setLive] = useState<LivePayload | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [savingScan, setSavingScan] = useState(false);
+  const [intervalInput, setIntervalInput] = useState(
+    String(initialSettings.autoScanIntervalMinutes)
+  );
+  const [triggeringUserId, setTriggeringUserId] = useState<string | null>(null);
+  const [releasingLockUserId, setReleasingLockUserId] = useState<string | null>(
+    null
+  );
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function showMsg(text: string, type: "success" | "error" = "success") {
+    showToast(text, type);
+  }
+
+  const pollLive = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/sync/live", { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) {
+        setPollError(data.error ?? "Gagal memuat status live");
+        return;
+      }
+      setLive(data as LivePayload);
+      setSettings(data.settings);
+      setIntervalInput(String(data.settings.autoScanIntervalMinutes));
+      setPollError(null);
+    } catch {
+      setPollError("Koneksi ke server gagal");
+    }
+  }, []);
+
+  useEffect(() => {
+    void pollLive();
+    pollRef.current = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void pollLive();
+      }
+    }, POLL_MS);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [pollLive]);
+
+  async function saveSettings(
+    patch: Record<string, unknown>,
+    options?: { silent?: boolean }
+  ) {
+    setSavingScan(true);
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "updateSettings", ...patch }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal menyimpan pengaturan", "error");
+        return null;
+      }
+      setSettings(data.settings);
+      setIntervalInput(String(data.settings.autoScanIntervalMinutes));
+      if (!options?.silent) showMsg("Pengaturan sync disimpan");
+      void pollLive();
+      return data;
+    } finally {
+      setSavingScan(false);
+    }
+  }
+
+  async function toggleAutoSync() {
+    const turningOn = !settings.autoScanEnabled;
+    setSavingScan(true);
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "updateSettings",
+          autoScanEnabled: turningOn,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal mengubah sync otomatis", "error");
+        return;
+      }
+      setSettings(data.settings);
+      setIntervalInput(String(data.settings.autoScanIntervalMinutes));
+      void pollLive();
+
+      if (turningOn) {
+        if (data.syncTriggerError) {
+          showMsg(
+            `Jadwal aktif, tapi sync sekarang gagal: ${data.syncTriggerError}`,
+            "error"
+          );
+          return;
+        }
+        const enqueued = data.syncTrigger?.enqueued?.length ?? 0;
+        const skipped = data.syncTrigger?.skippedActive?.length ?? 0;
+        showMsg(
+          `Sync otomatis aktif. ${enqueued} job dibuat sekarang.${skipped > 0 ? ` ${skipped} user dilewati (job aktif).` : ""}`
+        );
+      } else {
+        const cancelled = data.syncCancel?.cancelledJobIds?.length ?? 0;
+        const abandoned = data.syncCancel?.abandonedFiles ?? 0;
+        showMsg(
+          cancelled > 0
+            ? `Sync otomatis dimatikan. ${cancelled} job dibatalkan, ${abandoned} file antre dibersihkan.`
+            : "Sync otomatis dimatikan."
+        );
+      }
+    } finally {
+      setSavingScan(false);
+    }
+  }
+
+  async function triggerDelta(userId: string, reconcileOnly = false) {
+    setTriggeringUserId(userId);
+    try {
+      const res = await fetch("/api/admin/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, reconcileOnly }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal trigger scan", "error");
+        return;
+      }
+      showMsg(
+        reconcileOnly
+          ? `Reconcile job ${data.jobId} dibuat`
+          : `Delta sync job ${data.jobId} dibuat`
+      );
+      void pollLive();
+    } finally {
+      setTriggeringUserId(null);
+    }
+  }
+
+  async function releaseUserLock(userId: string) {
+    setReleasingLockUserId(userId);
+    try {
+      const res = await fetch("/api/admin/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "releaseLock", userId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal release lock", "error");
+        return;
+      }
+      showMsg(data.released ? "Scan lock dilepas" : "Tidak ada lock aktif");
+      void pollLive();
+    } finally {
+      setReleasingLockUserId(null);
+    }
+  }
+
+  const stage = live ? inferStage(live) : "idle";
+  const health = live?.health;
+  const pipeline = live?.pipeline;
+  const batchLabel = live?.batchUnlimited
+    ? "tanpa batas"
+    : String(live?.batchSize ?? 750);
+
+  const stages: Array<{
+    key: PipelineStage;
+    label: string;
+    count: number;
+    hint: string;
+  }> = [
+    {
+      key: "discover",
+      label: "1. Discover",
+      count:
+        (health?.queues.discover.active ?? 0) +
+        (health?.queues.discover.waiting ?? 0) +
+        (pipeline?.discovered ?? 0),
+      hint: "Scan folder cloud",
+    },
+    {
+      key: "download",
+      label: "2. Unduh",
+      count:
+        (pipeline?.downloading ?? 0) +
+        (pipeline?.discovered ?? 0) +
+        (health?.queues.ingest.active ?? 0),
+      hint: "Download + kirim ke Paperless",
+    },
+    {
+      key: "ocr",
+      label: "3. OCR",
+      count: (pipeline?.ocrPending ?? 0) + (pipeline?.queued ?? 0),
+      hint: "Paperless memproses OCR",
+    },
+    {
+      key: "embed",
+      label: "4. Embed",
+      count: pipeline?.embedPending ?? 0,
+      hint: "Embedding untuk Ask",
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">Sync live</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Tahapan pipeline, job aktif, dan riwayat. Diperbarui otomatis tiap{" "}
+            {POLL_MS / 1000}s.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1",
+              pollError
+                ? "bg-red-50 text-red-700"
+                : "bg-teal-50 text-teal-700"
+            )}
+          >
+            <Radio
+              size={12}
+              className={cn(!pollError && "animate-pulse")}
+            />
+            {pollError ? pollError : "Live"}
+          </span>
+          {live?.at && (
+            <span>
+              {new Date(live.at).toLocaleTimeString("id-ID")}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <Card className="!p-0 overflow-hidden">
+        <div className="border-b border-slate-100 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
+              <RefreshCw size={18} />
+            </div>
+            <div>
+              <h2 className="section-title">Sync cloud</h2>
+              <p className="text-xs text-slate-500">
+                Batch {batchLabel} file per job, lanjut otomatis sampai habis.
+                {live?.credsUserCount != null && (
+                  <span> {live.credsUserCount} user dengan kredensial.</span>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="space-y-5 p-6">
+          <div
+            className={cn(
+              "flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-4",
+              settings.autoScanEnabled
+                ? "border-teal-200 bg-teal-50/60"
+                : "border-slate-200 bg-slate-50/60"
+            )}
+          >
+            <div>
+              <p className="text-sm font-medium text-slate-800">Sync otomatis</p>
+              <p className="mt-1 text-xs text-slate-600">
+                Aktifkan: sync semua user sekarang (batch {batchLabel}, kejar
+                sampai habis), lalu ulang tiap interval. Matikan: hentikan
+                jadwal, batalkan job aktif, bersihkan antrean.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.autoScanEnabled}
+              disabled={savingScan}
+              onClick={() => void toggleAutoSync()}
+              className={cn(
+                "relative h-7 w-12 shrink-0 rounded-full transition-colors",
+                settings.autoScanEnabled ? "bg-teal-600" : "bg-slate-300",
+                savingScan && "opacity-60"
+              )}
+            >
+              <span
+                className={cn(
+                  "absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform",
+                  settings.autoScanEnabled && "translate-x-5"
+                )}
+              />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-end gap-4">
+            <label className="block min-w-[140px] text-xs text-slate-600">
+              Interval sync (menit)
+              <input
+                type="number"
+                min={5}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                value={intervalInput}
+                onChange={(e) => setIntervalInput(e.target.value)}
+                disabled={savingScan}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={savingScan}
+              onClick={() =>
+                void saveSettings({
+                  autoScanIntervalMinutes: Number(intervalInput),
+                })
+              }
+              className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+            >
+              Simpan interval
+            </button>
+          </div>
+
+          <dl className="grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+            <div>
+              <dt className="font-medium text-slate-500">Jadwal</dt>
+              <dd>{settings.autoScanEnabled ? "Aktif" : "Nonaktif"}</dd>
+            </div>
+            <div>
+              <dt className="font-medium text-slate-500">Terakhir jalan</dt>
+              <dd>
+                {settings.autoScanLastRunAt
+                  ? new Date(settings.autoScanLastRunAt).toLocaleString("id-ID")
+                  : "-"}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </Card>
+
+      <Card className="!p-0 overflow-hidden">
+        <div className="border-b border-slate-100 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+              <Activity size={18} />
+            </div>
+            <div>
+              <h2 className="section-title">Tahapan pipeline</h2>
+              <p className="text-xs text-slate-500">
+                Highlight menandai tahap yang sedang aktif. OCR selesai:{" "}
+                {pipeline?.ocrDone ?? 0} file.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
+          {stages.map((s, i) => (
+            <div key={s.key} className="relative">
+              {i > 0 && (
+                <span
+                  className="absolute -left-2 top-1/2 hidden h-px w-3 -translate-y-1/2 bg-slate-200 lg:block"
+                  aria-hidden
+                />
+              )}
+              <div
+                className={cn(
+                  "rounded-xl border px-4 py-3 transition",
+                  stage === s.key
+                    ? "border-teal-300 bg-teal-50 ring-2 ring-teal-200"
+                    : "border-slate-100 bg-slate-50"
+                )}
+              >
+                <p className="text-xs font-medium text-slate-700">{s.label}</p>
+                <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">
+                  {s.count}
+                </p>
+                <p className="mt-0.5 text-[11px] text-slate-500">{s.hint}</p>
+                {stage === s.key && (
+                  <p className="mt-1 text-[10px] font-medium text-teal-700">
+                    Aktif sekarang
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        {stage === "idle" && live && live.activeJobs.length === 0 && (
+          <p className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
+            Tidak ada aktivitas sync. Aktifkan toggle atau trigger delta manual.
+          </p>
+        )}
+      </Card>
+
+      {live && live.activeJobs.length > 0 && (
+        <Card className="!p-0 overflow-hidden">
+          <div className="border-b border-slate-100 px-6 py-4">
+            <h2 className="section-title">Job aktif ({live.activeJobs.length})</h2>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {live.activeJobs.map((job) => (
+              <div key={job.id} className="space-y-2 px-6 py-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">
+                      {job.user?.email ?? "Sistem"}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {job.jobType} · {job.phaseLabel}
+                    </p>
+                  </div>
+                  <span className="rounded bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700">
+                    {job.status}
+                  </span>
+                </div>
+                {job.totalFiles > 0 && (
+                  <div>
+                    <div className="flex justify-between text-xs text-slate-600">
+                      <span>
+                        {job.processedFiles}/{job.totalFiles} file
+                        {job.newFiles > 0 && (
+                          <span className="text-teal-600"> +{job.newFiles} baru</span>
+                        )}
+                        {job.skippedFiles > 0 && (
+                          <span className="text-slate-400">
+                            {" "}
+                            skip {job.skippedFiles}
+                          </span>
+                        )}
+                        {job.failedFiles > 0 && (
+                          <span className="text-red-600">
+                            {" "}
+                            fail {job.failedFiles}
+                          </span>
+                        )}
+                      </span>
+                      {job.progressPct != null && (
+                        <span className="tabular-nums">{job.progressPct}%</span>
+                      )}
+                    </div>
+                    <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className="h-full rounded-full bg-teal-500 transition-all duration-500"
+                        style={{
+                          width: `${job.progressPct ?? 0}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {job.currentFile && (
+                  <p className="truncate font-mono text-[10px] text-slate-400">
+                    {job.currentFile}
+                  </p>
+                )}
+                {job.errorMessage && (
+                  <p className="text-xs text-red-600">{job.errorMessage}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card className="!p-0 overflow-hidden">
+        <div className="border-b border-slate-100 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+              <Server size={18} />
+            </div>
+            <div>
+              <h2 className="section-title">Scan health</h2>
+              <p className="text-xs text-slate-500">
+                Queue BullMQ, Redis, job macet, dan user lock.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+            <p className="font-medium text-slate-600">Discover queue</p>
+            <p className="mt-1 tabular-nums text-slate-800">
+              wait {health?.queues.discover.waiting ?? 0} · active{" "}
+              {health?.queues.discover.active ?? 0}
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+            <p className="font-medium text-slate-600">Ingest queue</p>
+            <p className="mt-1 tabular-nums text-slate-800">
+              wait {health?.queues.ingest.waiting ?? 0} · active{" "}
+              {health?.queues.ingest.active ?? 0}
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+            <p className="font-medium text-slate-600">Pipeline file</p>
+            <p className="mt-1 tabular-nums text-slate-800">
+              OCR pending {pipeline?.ocrPending ?? 0} · unduh{" "}
+              {pipeline?.downloading ?? 0}
+            </p>
+            <p className="mt-0.5 text-slate-500">
+              OCR selesai {pipeline?.ocrDone ?? 0}
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+            <p className="font-medium text-slate-600">Redis</p>
+            <p className="mt-1 text-slate-800">
+              {health?.redis.usedMemoryHuman ?? "-"} /{" "}
+              {health?.redis.maxMemoryHuman ?? "-"}
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+            <p className="font-medium text-slate-600">User locks</p>
+            <p className="mt-1 text-slate-800">
+              {health?.userLocks.length ?? 0} aktif
+            </p>
+          </div>
+        </div>
+        {health && health.stuckJobs.length > 0 && (
+          <div className="border-t border-slate-100 px-4 py-3">
+            <p className="text-xs font-medium text-amber-800">
+              Job RUNNING macet ({health.stuckJobs.length})
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-slate-600">
+              {health.stuckJobs.map((job) => (
+                <li
+                  key={job.id}
+                  className="rounded border border-amber-100 bg-amber-50 px-2 py-1"
+                >
+                  <span className="font-mono text-slate-700">{job.id}</span>
+                  {job.userEmail && (
+                    <span className="text-slate-500"> · {job.userEmail}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {health?.throughput && (
+          <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-600">
+            <p className="font-medium text-slate-700">Throughput worker</p>
+            <p className="mt-1 tabular-nums">
+              batch {batchLabel} · discover {health.throughput.discoverConcurrency}{" "}
+              · ingest {health.throughput.ingestConcurrency} · download{" "}
+              {health.throughput.webdavDownloadConcurrency}
+            </p>
+          </div>
+        )}
+      </Card>
+
+      <Card className="!p-0 overflow-hidden">
+        <div className="border-b border-slate-100 px-6 py-4">
+          <h2 className="section-title">Status per user</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            Trigger delta atau reconcile manual. Data live tanpa refresh.
+          </p>
+        </div>
+        <div className="overflow-x-auto p-4">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-slate-100 text-slate-500">
+                <th className="py-2 pr-3">User</th>
+                <th className="py-2 pr-3">OCR done</th>
+                <th className="py-2 pr-3">Pending</th>
+                <th className="py-2 pr-3">Failed</th>
+                <th className="py-2 pr-3">Lock</th>
+                <th className="py-2 pr-3">Job aktif</th>
+                <th className="py-2">Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!live?.users?.length && (
+                <tr>
+                  <td colSpan={7} className="py-4 text-slate-400">
+                    Memuat...
+                  </td>
+                </tr>
+              )}
+              {live?.users.map((row) => (
+                <tr key={row.userId} className="border-b border-slate-50">
+                  <td className="py-2 pr-3">
+                    <div className="font-medium text-slate-800">{row.email}</div>
+                    {row.lastDiscoveryAt && (
+                      <div className="text-[10px] text-slate-400">
+                        discover{" "}
+                        {new Date(row.lastDiscoveryAt).toLocaleString("id-ID")}
+                      </div>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3 tabular-nums">{row.ocrDone}</td>
+                  <td className="py-2 pr-3 tabular-nums">
+                    {row.ocrPending + row.downloading}
+                  </td>
+                  <td className="py-2 pr-3 tabular-nums">
+                    {row.failed}
+                    {row.failedRetryable > 0 && (
+                      <span className="text-amber-600">
+                        {" "}
+                        ({row.failedRetryable} retry)
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3">
+                    {row.scanLockHeld ? (
+                      <button
+                        type="button"
+                        disabled={releasingLockUserId === row.userId}
+                        onClick={() => void releaseUserLock(row.userId)}
+                        className="text-amber-700 hover:underline disabled:opacity-50"
+                      >
+                        Lock
+                      </button>
+                    ) : (
+                      <span className="text-slate-400">-</span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3 text-slate-600">
+                    {row.activeJob
+                      ? `${row.activeJob.phaseLabel} (${row.activeJob.processedFiles}/${row.activeJob.totalFiles})`
+                      : "-"}
+                  </td>
+                  <td className="py-2">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={
+                          triggeringUserId === row.userId ||
+                          row.activeJob != null
+                        }
+                        onClick={() => void triggerDelta(row.userId)}
+                        className="rounded border border-teal-200 px-2 py-1 text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+                      >
+                        Delta
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          triggeringUserId === row.userId ||
+                          row.activeJob != null
+                        }
+                        onClick={() => void triggerDelta(row.userId, true)}
+                        className="rounded border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        Reconcile
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card className="!p-0 overflow-hidden">
+        <div className="border-b border-slate-100 px-6 py-4">
+          <h2 className="section-title">Riwayat job</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            25 job terakhir, diperbarui otomatis.
+          </p>
+        </div>
+        <div className="overflow-x-auto p-4">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-slate-100 text-slate-500">
+                <th className="py-2 pr-3">Waktu</th>
+                <th className="py-2 pr-3">User</th>
+                <th className="py-2 pr-3">Tipe</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Tahap</th>
+                <th className="py-2 pr-3">Progres</th>
+                <th className="py-2 pr-3">Durasi</th>
+                <th className="py-2">Catatan</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!live?.recentJobs?.length && (
+                <tr>
+                  <td colSpan={8} className="py-4 text-slate-400">
+                    Belum ada job
+                  </td>
+                </tr>
+              )}
+              {live?.recentJobs.map((job) => (
+                <tr key={job.id} className="border-b border-slate-50">
+                  <td className="py-2 pr-3 text-slate-500">
+                    {job.createdAt
+                      ? new Date(job.createdAt).toLocaleString("id-ID")
+                      : "-"}
+                  </td>
+                  <td className="py-2 pr-3">{job.user?.email ?? "-"}</td>
+                  <td className="py-2 pr-3 font-mono text-[11px] text-slate-700">
+                    {job.jobType}
+                  </td>
+                  <td className="py-2 pr-3">
+                    <span
+                      className={cn(
+                        "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                        job.status === "COMPLETED" && "bg-teal-50 text-teal-700",
+                        job.status === "RUNNING" && "bg-blue-50 text-blue-700",
+                        job.status === "FAILED" && "bg-red-50 text-red-700",
+                        job.status === "PENDING" && "bg-slate-100 text-slate-600",
+                        job.status === "CANCELLED" && "bg-slate-100 text-slate-500"
+                      )}
+                    >
+                      {job.status}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-slate-600">{job.phaseLabel}</td>
+                  <td className="py-2 pr-3 tabular-nums text-slate-600">
+                    {job.processedFiles}/{job.totalFiles}
+                  </td>
+                  <td className="py-2 pr-3 tabular-nums text-slate-500">
+                    {formatDurationMs(job.durationMs)}
+                  </td>
+                  <td className="py-2 max-w-[200px]">
+                    {job.currentFile && job.status === "RUNNING" && (
+                      <p className="truncate text-slate-400">{job.currentFile}</p>
+                    )}
+                    {job.errorMessage && (
+                      <p className="truncate text-red-600">{job.errorMessage}</p>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}

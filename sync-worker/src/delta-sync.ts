@@ -174,7 +174,14 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
   const now = new Date();
 
   const ingestLimit = payload.reconcileOnly ? 0 : payload.limit;
-  const fullDiscover = isUnlimitedSyncBatch() || ingestLimit >= SYNC_NO_LIMIT / 2;
+  // Capped ingest must walk the full tree each delta; otherwise folder snapshots
+  // hide files that were discovered but not yet ingested in a prior batch.
+  const ingestCapped =
+    !payload.reconcileOnly &&
+    ingestLimit > 0 &&
+    ingestLimit < SYNC_NO_LIMIT / 2;
+  const fullDiscover =
+    isUnlimitedSyncBatch() || ingestLimit >= SYNC_NO_LIMIT / 2 || ingestCapped;
 
   try {
     await prisma.scanJob.update({

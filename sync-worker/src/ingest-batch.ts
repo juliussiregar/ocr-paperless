@@ -509,6 +509,9 @@ export async function runIngestPathsForJob(
       paths,
       creds
     );
+
+    const { maybeChainNextDeltaSync } = await import("./sync-chase.js");
+    await maybeChainNextDeltaSync(userId, `ingest ${jobId} completed`);
   } catch (err) {
     if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {
       const abandoned = await abandonInFlightSyncFiles(
