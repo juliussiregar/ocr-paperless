@@ -80,3 +80,28 @@ export function isIngestibleFileName(
   }
   return false;
 }
+
+export function fileCategoryFromName(
+  name: string,
+  mimeType?: string | null
+): FileCategory {
+  const ext = extensionFromName(name);
+  if (ext && EXT_TO_CATEGORY[ext]) return EXT_TO_CATEGORY[ext];
+
+  const mime = (mimeType ?? "").trim().toLowerCase();
+  if (mime) {
+    if (MIME_EXACT[mime]) return MIME_EXACT[mime];
+    for (const { prefix, category } of MIME_PREFIX) {
+      if (mime.startsWith(prefix)) return category;
+    }
+  }
+
+  return "other";
+}
+
+export function isPdfFileName(
+  name: string,
+  mimeType?: string | null
+): boolean {
+  return fileCategoryFromName(name, mimeType) === "pdf";
+}

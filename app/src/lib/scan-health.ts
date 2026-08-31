@@ -35,6 +35,17 @@ export type ScanHealth = {
   ingestMaxRetries: number;
   failedExhaustedTotal: number;
   pgJobCounts: Array<{ status: string; count: number }>;
+  throughput: {
+    scanMaxFiles: number;
+    discoverConcurrency: number;
+    ingestConcurrency: number;
+    webdavDiscoveryConcurrency: number;
+    webdavDownloadConcurrency: number;
+    ocrReconcileIntervalMs: number;
+    embedBackfillBatch: number;
+    postSyncWarmEnabled: boolean;
+    postSyncWarmMaxDirs: number;
+  };
 };
 
 function ingestMaxRetries(): number {
@@ -78,6 +89,11 @@ function parseRedisInfo(info: string): Record<string, string> {
     map[line.slice(0, idx)] = line.slice(idx + 1).trim();
   }
   return map;
+}
+
+function numEnv(key: string, fallback: number): number {
+  const n = Number(process.env[key] ?? String(fallback));
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export async function getScanHealth(): Promise<ScanHealth> {
@@ -159,6 +175,18 @@ export async function getScanHealth(): Promise<ScanHealth> {
       status: r.status,
       count: r._count._all,
     })),
+    throughput: {
+      scanMaxFiles: numEnv("SCAN_MAX_FILES", 100),
+      discoverConcurrency: numEnv("SCAN_DISCOVER_CONCURRENCY", 4),
+      ingestConcurrency: numEnv("SCAN_INGEST_CONCURRENCY", 4),
+      webdavDiscoveryConcurrency: numEnv("WEBDAV_DISCOVERY_CONCURRENCY", 24),
+      webdavDownloadConcurrency: numEnv("WEBDAV_DOWNLOAD_CONCURRENCY", 4),
+      ocrReconcileIntervalMs: numEnv("OCR_RECONCILE_INTERVAL_MS", 15000),
+      embedBackfillBatch: numEnv("EMBED_BACKFILL_BATCH", 15),
+      postSyncWarmEnabled:
+        (process.env.POST_SYNC_WARM_ENABLED ?? "true") !== "false",
+      postSyncWarmMaxDirs: numEnv("POST_SYNC_WARM_MAX_DIRS", 16),
+    },
   };
 }
 

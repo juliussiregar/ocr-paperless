@@ -1,5 +1,5 @@
 import { ScanJobStatus, SyncStatus } from "@prisma/client";
-import { prisma } from "./db.js";
+import { prisma, getUserCloudCredentials } from "./db.js";
 import {
   ScanAbortedError,
   discardTemp,
@@ -502,10 +502,12 @@ export async function runIngestPathsForJob(
       where: { id: jobId },
       select: { selectedPaths: true },
     });
+    const creds = await getUserCloudCredentials(userId);
     await invalidateAfterScanJob(
       userId,
       jobRow?.selectedPaths ?? null,
-      paths
+      paths,
+      creds
     );
   } catch (err) {
     if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {

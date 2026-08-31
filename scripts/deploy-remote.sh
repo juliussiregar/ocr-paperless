@@ -22,9 +22,23 @@ remote_deploy() {
   fi
 
   # Soft defaults without overwriting user values
-  grep -q '^PAPERLESS_CONSUMER_POLLING=' .env || echo 'PAPERLESS_CONSUMER_POLLING=5' >> .env
-  grep -q '^OCR_RECONCILE_INTERVAL_MS=' .env || echo 'OCR_RECONCILE_INTERVAL_MS=15000' >> .env
-  grep -q '^COMPOSE_PROFILES=prod' .env || echo 'COMPOSE_PROFILES=prod' >> .env
+  append_env_if_missing() {
+    local key="$1" val="$2"
+    if ! grep -q "^${key}=" .env; then
+      echo "${key}=${val}" >> .env
+    fi
+  }
+  append_env_if_missing PAPERLESS_CONSUMER_POLLING 5
+  append_env_if_missing OCR_RECONCILE_INTERVAL_MS 10000
+  append_env_if_missing COMPOSE_PROFILES prod
+  append_env_if_missing SCAN_MAX_FILES 150
+  append_env_if_missing SCAN_DISCOVER_CONCURRENCY 6
+  append_env_if_missing SCAN_INGEST_CONCURRENCY 6
+  append_env_if_missing WEBDAV_DISCOVERY_CONCURRENCY 32
+  append_env_if_missing WEBDAV_DOWNLOAD_CONCURRENCY 6
+  append_env_if_missing POST_SYNC_WARM_ENABLED true
+  append_env_if_missing POST_SYNC_WARM_MAX_DIRS 24
+  append_env_if_missing EMBED_BACKFILL_BATCH 25
 
   export COMPOSE_PARALLEL_LIMIT=1
   export DOCKER_BUILDKIT=1

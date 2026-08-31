@@ -98,6 +98,19 @@ const LABELS: Record<
     title: "Pengaturan auto scan",
     category: "admin",
   },
+  "admin.scan.trigger_all": {
+    title: "Sync semua user",
+    category: "admin",
+    description: "Discover, download, dan scan untuk semua user dengan kredensial Bappenas",
+  },
+  "admin.scan.trigger": {
+    title: "Trigger delta sync",
+    category: "admin",
+  },
+  "admin.scan.release_lock": {
+    title: "Release scan lock",
+    category: "admin",
+  },
 };
 
 export function describeAuditAction(action: string): {

@@ -33,6 +33,23 @@ export async function getUserBappenasCreds(userId: string): Promise<{
   }
 }
 
+/** Users with decryptable Bappenas credentials (excludes placeholders). */
+export async function listUsersWithBappenasCreds(): Promise<
+  Array<{ id: string; email: string }>
+> {
+  const users = await prisma.user.findMany({
+    select: { id: true, email: true },
+    orderBy: { email: "asc" },
+  });
+
+  const withCreds: Array<{ id: string; email: string }> = [];
+  for (const u of users) {
+    const creds = await getUserBappenasCreds(u.id);
+    if (creds) withCreds.push({ id: u.id, email: u.email });
+  }
+  return withCreds;
+}
+
 export type UiIngestStatus =
   | "not_ingested"
   | "processing"

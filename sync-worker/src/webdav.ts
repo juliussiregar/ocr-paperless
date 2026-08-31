@@ -4,7 +4,31 @@ import { mkdir, rename, unlink } from "fs/promises";
 import { join } from "path";
 import { Readable } from "stream";
 import { createClient, type FileStat } from "webdav";
-import { isIngestibleFileName } from "./file-types.js";
+import { isIngestibleFileName, isPdfFileName, fileCategoryFromName } from "./file-types.js";
+
+export type CloudEntry = {
+  type: "directory" | "file";
+  path: string;
+  name: string;
+  size: number | null;
+  lastModified: string | null;
+  mimeType: string | null;
+  isIngestible: boolean;
+  isPdf: boolean;
+  fileCategory: string;
+};
+
+export type DirectoryListing = {
+  entries: CloudEntry[];
+  dirEtag: string | null;
+  dirLastModified: string | null;
+};
+
+function normalizeListingPath(path: string): string {
+  if (!path || path === "/") return "/";
+  const withSlash = path.startsWith("/") ? path : `/${path}`;
+  return withSlash.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
 
 export interface RemoteFile {
   path: string;
@@ -43,7 +67,7 @@ function normalizeEtag(etag: unknown): string | null {
 function discoveryConcurrency(): number {
   const n = Number(process.env.WEBDAV_DISCOVERY_CONCURRENCY ?? "16");
   if (!Number.isFinite(n)) return 16;
-  return Math.min(24, Math.max(1, Math.floor(n)));
+  return Math.min(32, Math.max(1, Math.floor(n)));
 }
 
 function extractFileId(item: FileStat): string | null {
@@ -616,11 +640,63 @@ export function createWebDavClient(
     }
   }
 
+  async function listDirectory(path: string): Promise<DirectoryListing> {
+    const dir = normalizeListingPath(path);
+    const items = await client.getDirectoryContents(dir === "/" ? "/" : dir);
+    const list = Array.isArray(items) ? items : [items];
+
+    let dirEtag: string | null = null;
+    let dirLastModified: string | null = null;
+    const dirSelf = list.find(
+      (item) =>
+        item.type === "directory" &&
+        (item.filename === dir || item.filename === `${dir}/`)
+    );
+    if (dirSelf) {
+      dirEtag = normalizeEtag(dirSelf.etag);
+      dirLastModified = dirSelf.lastmod
+        ? new Date(dirSelf.lastmod).toISOString()
+        : null;
+    }
+
+    const entries: CloudEntry[] = [];
+    for (const item of list) {
+      if (item.filename === dir || item.filename === `${dir}/`) continue;
+
+      const mime = item.mime ?? null;
+      const ingestible =
+        item.type === "file" && isIngestibleFileName(item.basename, mime);
+
+      entries.push({
+        type: item.type === "directory" ? "directory" : "file",
+        path: item.filename,
+        name: item.basename,
+        size: typeof item.size === "number" ? item.size : null,
+        lastModified: item.lastmod ? new Date(item.lastmod).toISOString() : null,
+        mimeType: mime,
+        isIngestible: ingestible,
+        isPdf: item.type === "file" && isPdfFileName(item.basename, mime),
+        fileCategory:
+          item.type === "file"
+            ? fileCategoryFromName(item.basename, mime)
+            : "other",
+      });
+    }
+
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+      return a.name.localeCompare(b.name, "id");
+    });
+
+    return { entries, dirEtag, dirLastModified };
+  }
+
   return {
     listAllDocuments,
     listNewestDocuments,
     listAllPdfFiles: listAllDocuments,
     listNewestPdfFiles: listNewestDocuments,
+    listDirectory,
     downloadFile,
     downloadToTemp,
     testConnection,

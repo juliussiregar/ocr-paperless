@@ -80,7 +80,9 @@ Lihat checklist lengkap: [deploy.md](./deploy.md)
 | `SCAN_MAX_FILES` | `50` | Cap fallback batch |
 | `SCAN_DISCOVER_CONCURRENCY` | `4` | Parallel discover jobs (max 8) |
 | `SCAN_INGEST_CONCURRENCY` | `4` | Parallel ingest jobs (max 12) |
-| `WEBDAV_DOWNLOAD_CONCURRENCY` | `4` | Parallel download per ingest (max 8) |
+| `WEBDAV_DOWNLOAD_CONCURRENCY` | `4` | Parallel download per ingest (max 10) |
+| `POST_SYNC_WARM_ENABLED` | `true` | Warm listing cache setelah sync |
+| `POST_SYNC_WARM_MAX_DIRS` | `16` | Max folder di-warm (root + 1 level) |
 | `WEBDAV_DISCOVERY_CONCURRENCY` | `24` | Parallel folder listing |
 | `INGEST_MAX_RETRY_COUNT` | `5` | Auto-retry cap per FAILED file |
 | `SCAN_STUCK_JOB_MINUTES` | `45` | Admin alert threshold for RUNNING jobs |

@@ -381,7 +381,7 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
       });
       await invalidateAfterScanJob(userId, job.selectedPaths, [
         payload.rootPath,
-      ]);
+      ], creds);
       return;
     }
 
@@ -419,7 +419,7 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
     await invalidateAfterScanJob(userId, job.selectedPaths, [
       payload.rootPath,
       ...cappedIngest,
-    ]);
+    ], creds);
   } catch (err) {
     if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {
       const abandoned = await abandonInFlightSyncFiles(

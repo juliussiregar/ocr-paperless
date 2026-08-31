@@ -430,7 +430,8 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
       await invalidateAfterScanJob(
         userId,
         job.selectedPaths,
-        payload.mode === "paths" ? payload.paths : [payload.rootPath]
+        payload.mode === "paths" ? payload.paths : [payload.rootPath],
+        creds
       );
       if (
         payload &&
@@ -877,7 +878,8 @@ async function runFullScanJob(jobId: string): Promise<void> {
     await invalidateAfterScanJob(
       userId,
       job.selectedPaths,
-      remoteFiles.map((f) => f.path)
+      remoteFiles.map((f) => f.path),
+      creds
     );
   } catch (err) {
     if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {

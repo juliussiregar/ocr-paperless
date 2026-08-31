@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, RefreshCw, Server } from "lucide-react";
+import { Activity, Play, RefreshCw, Server } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/Toast";
@@ -74,6 +74,46 @@ interface ScanHealth {
   ingestMaxRetries: number;
   failedExhaustedTotal: number;
   pgJobCounts: Array<{ status: string; count: number }>;
+  throughput?: {
+    scanMaxFiles: number;
+    discoverConcurrency: number;
+    ingestConcurrency: number;
+    webdavDiscoveryConcurrency: number;
+    webdavDownloadConcurrency: number;
+    ocrReconcileIntervalMs: number;
+    embedBackfillBatch: number;
+    postSyncWarmEnabled: boolean;
+    postSyncWarmMaxDirs: number;
+  };
+}
+
+interface RecentJobRow {
+  id: string;
+  jobType: string;
+  status: string;
+  phase: string | null;
+  totalFiles: number;
+  processedFiles: number;
+  skippedFiles: number;
+  failedFiles: number;
+  newFiles: number;
+  errorMessage: string | null;
+  currentFile: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  durationMs: number | null;
+  user: { id: string; email: string; name: string | null } | null;
+}
+
+function formatDurationMs(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return "-";
+  if (ms < 1000) return `${ms} ms`;
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return rem > 0 ? `${min}m ${rem}s` : `${min}m`;
 }
 
 interface AdminPanelProps {
@@ -100,9 +140,11 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
     String(initialSettings.autoRetryBatchSize ?? 30)
   );
   const [backlog, setBacklog] = useState<BacklogRow[]>([]);
+  const [recentJobs, setRecentJobs] = useState<RecentJobRow[]>([]);
   const [scanHealth, setScanHealth] = useState<ScanHealth | null>(null);
   const [backlogLoading, setBacklogLoading] = useState(false);
   const [triggeringUserId, setTriggeringUserId] = useState<string | null>(null);
+  const [triggeringAll, setTriggeringAll] = useState(false);
   const [releasingLockUserId, setReleasingLockUserId] = useState<string | null>(
     null
   );
@@ -147,6 +189,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
         return;
       }
       setBacklog(data.backlog ?? []);
+      setRecentJobs(data.recentJobs ?? []);
       setScanHealth(data.health ?? null);
     } finally {
       setBacklogLoading(false);
@@ -183,6 +226,34 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
       void loadBacklog();
     } finally {
       setTriggeringUserId(null);
+    }
+  }
+
+  async function triggerDeltaAll() {
+    setTriggeringAll(true);
+    try {
+      const res = await fetch("/api/admin/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "triggerAll",
+          rootPath: rootInput,
+          limit: Number(batchInput),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal trigger sync semua user", "error");
+        return;
+      }
+      const enqueued = data.enqueued?.length ?? 0;
+      const skipped = data.skippedActive?.length ?? 0;
+      showMsg(
+        `${enqueued} job delta sync dibuat (batch ${data.limit}, root ${data.rootPath}). ${skipped > 0 ? `${skipped} user dilewati (job aktif).` : ""}`
+      );
+      void loadBacklog();
+    } finally {
+      setTriggeringAll(false);
     }
   }
 
@@ -319,6 +390,27 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
             </ul>
           </div>
         )}
+        {scanHealth?.throughput && (
+          <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-600">
+            <p className="font-medium text-slate-700">
+              Throughput aktif (env worker / app)
+            </p>
+            <p className="mt-1 tabular-nums">
+              batch {scanHealth.throughput.scanMaxFiles} · discover{" "}
+              {scanHealth.throughput.discoverConcurrency} · ingest{" "}
+              {scanHealth.throughput.ingestConcurrency} · webdav list{" "}
+              {scanHealth.throughput.webdavDiscoveryConcurrency} · download{" "}
+              {scanHealth.throughput.webdavDownloadConcurrency}
+            </p>
+            <p className="mt-0.5 tabular-nums">
+              OCR poll {scanHealth.throughput.ocrReconcileIntervalMs} ms · embed
+              batch {scanHealth.throughput.embedBackfillBatch} · post-sync warm{" "}
+              {scanHealth.throughput.postSyncWarmEnabled
+                ? `on (max ${scanHealth.throughput.postSyncWarmMaxDirs} folder)`
+                : "off"}
+            </p>
+          </div>
+        )}
       </Card>
 
       <Card className="!p-0 overflow-hidden">
@@ -443,6 +535,112 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
 
       <Card className="!p-0 overflow-hidden">
         <div className="border-b border-slate-100 px-6 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="section-title">Riwayat job sync</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                50 job terakhir. Detail per file:{" "}
+                <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px]">
+                  docker compose logs --tail=200 sync-worker
+                </code>
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={backlogLoading}
+              onClick={() => void loadBacklog()}
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+        <div className="overflow-x-auto p-4">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-slate-100 text-slate-500">
+                <th className="py-2 pr-3">Waktu</th>
+                <th className="py-2 pr-3">User</th>
+                <th className="py-2 pr-3">Tipe</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Fase</th>
+                <th className="py-2 pr-3">Progres</th>
+                <th className="py-2 pr-3">Durasi</th>
+                <th className="py-2">Catatan</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentJobs.length === 0 && !backlogLoading && (
+                <tr>
+                  <td colSpan={8} className="py-4 text-slate-400">
+                    Belum ada job
+                  </td>
+                </tr>
+              )}
+              {recentJobs.map((job) => (
+                <tr key={job.id} className="border-b border-slate-50">
+                  <td className="py-2 pr-3 text-slate-500">
+                    {new Date(job.createdAt).toLocaleString("id-ID")}
+                  </td>
+                  <td className="py-2 pr-3">
+                    {job.user?.email ?? "-"}
+                  </td>
+                  <td className="py-2 pr-3 font-mono text-[11px] text-slate-700">
+                    {job.jobType}
+                  </td>
+                  <td className="py-2 pr-3">
+                    <span
+                      className={cn(
+                        "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                        job.status === "COMPLETED" && "bg-teal-50 text-teal-700",
+                        job.status === "RUNNING" && "bg-blue-50 text-blue-700",
+                        job.status === "FAILED" && "bg-red-50 text-red-700",
+                        job.status === "PENDING" && "bg-slate-100 text-slate-600",
+                        job.status === "CANCELLED" && "bg-slate-100 text-slate-500"
+                      )}
+                    >
+                      {job.status}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-slate-600">
+                    {job.phase ?? "-"}
+                  </td>
+                  <td className="py-2 pr-3 tabular-nums text-slate-600">
+                    {job.processedFiles}/{job.totalFiles}
+                    {job.newFiles > 0 && (
+                      <span className="text-teal-600"> +{job.newFiles}</span>
+                    )}
+                    {job.failedFiles > 0 && (
+                      <span className="text-red-600"> fail {job.failedFiles}</span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3 tabular-nums text-slate-500">
+                    {formatDurationMs(job.durationMs)}
+                  </td>
+                  <td className="py-2 max-w-[200px]">
+                    <span className="font-mono text-[10px] text-slate-400">
+                      {job.id}
+                    </span>
+                    {job.errorMessage && (
+                      <p className="mt-0.5 truncate text-red-600">
+                        {job.errorMessage}
+                      </p>
+                    )}
+                    {job.currentFile && job.status === "RUNNING" && (
+                      <p className="mt-0.5 truncate text-slate-400">
+                        {job.currentFile}
+                      </p>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card className="!p-0 overflow-hidden">
+        <div className="border-b border-slate-100 px-6 py-4">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
               <RefreshCw size={18} />
@@ -460,6 +658,28 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
             Aktifkan auto download hanya setelah uji delta sync di staging.
             Tandai <strong>Siap deploy</strong> lalu nyalakan toggle jadwal.
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-teal-200 bg-teal-50/60 px-4 py-4">
+            <div>
+              <p className="text-sm font-medium text-slate-800">
+                Jalankan sync sekarang
+              </p>
+              <p className="mt-1 text-xs text-slate-600">
+                Discover, download, dan scan untuk semua user dengan kredensial
+                Bappenas. Pakai batch dan root path di bawah. User yang punya job
+                aktif dilewati.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={triggeringAll || savingScan}
+              onClick={() => void triggerDeltaAll()}
+              className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-60"
+            >
+              <Play size={16} />
+              {triggeringAll ? "Memproses..." : "Sync semua user"}
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-4">
