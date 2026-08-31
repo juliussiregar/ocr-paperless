@@ -9,6 +9,7 @@ import { getAutoScanSettings } from "@/lib/app-settings";
 import { SYNC_ROOT_PATH, syncBatchSize } from "@/lib/sync-defaults";
 import { getUserBappenasCreds, listUsersWithBappenasCreds } from "@/lib/bappenas";
 import { getScanHealth, releaseUserScanLock } from "@/lib/scan-health";
+import { triggerDeltaSyncForAllUsers } from "@/lib/admin-sync-trigger";
 
 function ingestMaxRetries(): number {
   const n = Number(process.env.INGEST_MAX_RETRY_COUNT ?? "5");
@@ -209,65 +210,17 @@ export async function POST(request: NextRequest) {
       Math.min(500, Number(body.limit) || syncBatchSize())
     );
 
-    const users = await listUsersWithBappenasCreds();
-    if (users.length === 0) {
-      return NextResponse.json(
-        { error: "Tidak ada user dengan kredensial Bappenas" },
-        { status: 400 }
-      );
-    }
-
-    const enqueued: Array<{ userId: string; email: string; jobId: string }> =
-      [];
-    const skippedActive: Array<{
-      userId: string;
-      email: string;
-      jobId: string;
-    }> = [];
-
-    for (const user of users) {
-      const active = await prisma.scanJob.findFirst({
-        where: activeScanJobWhere(user.id),
-        select: { id: true },
+    try {
+      const result = await triggerDeltaSyncForAllUsers(session!.user.id, {
+        rootPath,
+        limit,
       });
-      if (active) {
-        skippedActive.push({
-          userId: user.id,
-          email: user.email,
-          jobId: active.id,
-        });
-        continue;
-      }
-
-      const job = await prisma.scanJob.create({
-        data: {
-          status: ScanJobStatus.PENDING,
-          triggeredById: user.id,
-          jobType: "delta_sync",
-          selectedPaths: JSON.stringify({ rootPath, limit }),
-        },
-      });
-
-      await enqueueScanJob(job.id, job.jobType);
-      enqueued.push({ userId: user.id, email: user.email, jobId: job.id });
+      return NextResponse.json({ ok: true, ...result });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Gagal trigger sync semua user";
+      return NextResponse.json({ error: message }, { status: 400 });
     }
-
-    await writeAudit("admin.scan.trigger_all", session!.user.id, {
-      rootPath,
-      limit,
-      enqueuedCount: enqueued.length,
-      skippedActiveCount: skippedActive.length,
-      totalWithCreds: users.length,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      enqueued,
-      skippedActive,
-      totalWithCreds: users.length,
-      rootPath,
-      limit,
-    });
   }
 
   const userId = typeof body.userId === "string" ? body.userId : "";

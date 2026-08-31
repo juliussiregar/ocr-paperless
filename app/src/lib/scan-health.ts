@@ -46,6 +46,12 @@ export type ScanHealth = {
     postSyncWarmEnabled: boolean;
     postSyncWarmMaxDirs: number;
   };
+  pipeline: {
+    ocrPending: number;
+    downloading: number;
+    queued: number;
+    ocrDone: number;
+  };
 };
 
 function ingestMaxRetries(): number {
@@ -108,6 +114,10 @@ export async function getScanHealth(): Promise<ScanHealth> {
     stuckRows,
     failedExhaustedTotal,
     pgJobCounts,
+    ocrPending,
+    downloading,
+    queued,
+    ocrDone,
   ] = await Promise.all([
     getQueueCounts("scan-discover"),
     getQueueCounts("scan-ingest"),
@@ -149,6 +159,10 @@ export async function getScanHealth(): Promise<ScanHealth> {
         },
       },
     }),
+    prisma.syncFile.count({ where: { syncStatus: "OCR_PENDING" } }),
+    prisma.syncFile.count({ where: { syncStatus: "DOWNLOADING" } }),
+    prisma.syncFile.count({ where: { syncStatus: "QUEUED" } }),
+    prisma.syncFile.count({ where: { syncStatus: "OCR_DONE" } }),
   ]);
 
   const mem = parseRedisInfo(redisInfo);
@@ -186,6 +200,12 @@ export async function getScanHealth(): Promise<ScanHealth> {
       postSyncWarmEnabled:
         (process.env.POST_SYNC_WARM_ENABLED ?? "true") !== "false",
       postSyncWarmMaxDirs: numEnv("POST_SYNC_WARM_MAX_DIRS", 16),
+    },
+    pipeline: {
+      ocrPending,
+      downloading,
+      queued,
+      ocrDone,
     },
   };
 }

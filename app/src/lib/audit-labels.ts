@@ -111,6 +111,11 @@ const LABELS: Record<
     title: "Release scan lock",
     category: "admin",
   },
+  "admin.scan.cancel_all": {
+    title: "Batalkan semua job sync",
+    category: "admin",
+    description: "Sync otomatis dimatikan dari Admin",
+  },
 };
 
 export function describeAuditAction(action: string): {

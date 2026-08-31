@@ -70,9 +70,7 @@ async function pickAutoScanRootPath(): Promise<string> {
 }
 
 async function isAutoScanEnabled(): Promise<boolean> {
-  const envForce = (process.env.AUTO_SCAN_ENABLED ?? "false") === "true";
-  const toggle = (await getSetting(SETTING_AUTO_SCAN_ENABLED)) === "true";
-  return envForce || toggle;
+  return (await getSetting(SETTING_AUTO_SCAN_ENABLED)) === "true";
 }
 
 async function autoScanIntervalMs(): Promise<number> {

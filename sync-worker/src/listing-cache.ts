@@ -235,13 +235,11 @@ export async function invalidateAfterScanJob(
   await invalidateCloudCaches(userId, seeds);
 
   if (creds && postSyncWarmEnabled()) {
-    try {
-      await warmListingCaches(userId, creds, seeds);
-    } catch (err) {
+    void warmListingCaches(userId, creds, seeds).catch((err) => {
       console.warn(
         `[cache-warm] user ${userId} failed:`,
         err instanceof Error ? err.message : err
       );
-    }
+    });
   }
 }

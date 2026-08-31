@@ -21,7 +21,6 @@ export type AutoScanSettings = {
   autoScanEnabled: boolean;
   autoScanIntervalMinutes: number;
   autoScanLastRunAt: string | null;
-  envForceEnabled: boolean;
 };
 
 /** Write internal defaults used by worker (hidden from Admin UI). */
@@ -77,7 +76,6 @@ export async function getAutoScanSettings(): Promise<AutoScanSettings> {
     autoScanEnabled: map.get(SETTING_AUTO_SCAN_ENABLED) === "true",
     autoScanIntervalMinutes: interval,
     autoScanLastRunAt: map.get(SETTING_AUTO_SCAN_LAST_RUN_AT) ?? null,
-    envForceEnabled: (process.env.AUTO_SCAN_ENABLED ?? "false") === "true",
   };
 }
 

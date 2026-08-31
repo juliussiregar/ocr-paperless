@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Play, RefreshCw, Server } from "lucide-react";
+import { Activity, RefreshCw, Server } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/utils";
 import { showToast } from "@/components/Toast";
@@ -11,7 +11,6 @@ interface AutoScanSettings {
   autoScanEnabled: boolean;
   autoScanIntervalMinutes: number;
   autoScanLastRunAt: string | null;
-  envForceEnabled?: boolean;
 }
 
 interface BacklogRow {
@@ -79,6 +78,12 @@ interface ScanHealth {
     postSyncWarmEnabled: boolean;
     postSyncWarmMaxDirs: number;
   };
+  pipeline?: {
+    ocrPending: number;
+    downloading: number;
+    queued: number;
+    ocrDone: number;
+  };
 }
 
 interface RecentJobRow {
@@ -125,7 +130,6 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
   const [scanHealth, setScanHealth] = useState<ScanHealth | null>(null);
   const [backlogLoading, setBacklogLoading] = useState(false);
   const [triggeringUserId, setTriggeringUserId] = useState<string | null>(null);
-  const [triggeringAll, setTriggeringAll] = useState(false);
   const [releasingLockUserId, setReleasingLockUserId] = useState<string | null>(
     null
   );
@@ -134,7 +138,10 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
     showToast(text, type);
   }
 
-  async function saveSettings(patch: Record<string, unknown>) {
+  async function saveSettings(
+    patch: Record<string, unknown>,
+    options?: { silent?: boolean }
+  ) {
     setSavingScan(true);
     try {
       const res = await fetch("/api/admin", {
@@ -145,11 +152,62 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
       const data = await res.json();
       if (!res.ok) {
         showMsg(data.error ?? "Gagal menyimpan pengaturan", "error");
+        return null;
+      }
+      setSettings(data.settings);
+      setIntervalInput(String(data.settings.autoScanIntervalMinutes));
+      if (!options?.silent) {
+        showMsg("Pengaturan sync disimpan");
+      }
+      return data;
+    } finally {
+      setSavingScan(false);
+    }
+  }
+
+  async function toggleAutoSync() {
+    const turningOn = !settings.autoScanEnabled;
+    setSavingScan(true);
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "updateSettings",
+          autoScanEnabled: turningOn,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal mengubah sync otomatis", "error");
         return;
       }
       setSettings(data.settings);
       setIntervalInput(String(data.settings.autoScanIntervalMinutes));
-      showMsg("Pengaturan sync disimpan");
+      void loadBacklog();
+
+      if (turningOn) {
+        if (data.syncTriggerError) {
+          showMsg(
+            `Jadwal aktif, tapi sync sekarang gagal: ${data.syncTriggerError}`,
+            "error"
+          );
+          return;
+        }
+        const enqueued = data.syncTrigger?.enqueued?.length ?? 0;
+        const skipped = data.syncTrigger?.skippedActive?.length ?? 0;
+        showMsg(
+          `Sync otomatis aktif. ${enqueued} job dibuat sekarang.${skipped > 0 ? ` ${skipped} user dilewati (job aktif).` : ""} Matikan toggle ini untuk hentikan jadwal.`
+        );
+      } else {
+        const cancelled = data.syncCancel?.cancelledJobIds?.length ?? 0;
+        const abandoned = data.syncCancel?.abandonedFiles ?? 0;
+        showMsg(
+          cancelled > 0
+            ? `Sync otomatis dimatikan. ${cancelled} job dibatalkan, ${abandoned} file antre dibersihkan.`
+            : "Sync otomatis dimatikan."
+        );
+      }
     } finally {
       setSavingScan(false);
     }
@@ -203,30 +261,6 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
     }
   }
 
-  async function triggerDeltaAll() {
-    setTriggeringAll(true);
-    try {
-      const res = await fetch("/api/admin/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "triggerAll" }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        showMsg(data.error ?? "Gagal trigger sync semua user", "error");
-        return;
-      }
-      const enqueued = data.enqueued?.length ?? 0;
-      const skipped = data.skippedActive?.length ?? 0;
-      showMsg(
-        `${enqueued} job delta sync dibuat (batch ${data.limit}, root ${data.rootPath}). ${skipped > 0 ? `${skipped} user dilewati (job aktif).` : ""}`
-      );
-      void loadBacklog();
-    } finally {
-      setTriggeringAll(false);
-    }
-  }
-
   async function releaseUserLock(userId: string) {
     setReleasingLockUserId(userId);
     try {
@@ -247,8 +281,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
     }
   }
 
-  const schedulerActive =
-    settings.autoScanEnabled || settings.envForceEnabled;
+  const schedulerActive = settings.autoScanEnabled;
 
   return (
     <div className="space-y-6">
@@ -278,7 +311,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
             </button>
           </div>
         </div>
-        <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-5">
           <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
             <p className="font-medium text-slate-600">Discover queue</p>
             <p className="mt-1 tabular-nums text-slate-800">
@@ -306,6 +339,22 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
             )}
           </div>
           <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+            <p className="font-medium text-slate-600">Pipeline file</p>
+            <p className="mt-1 tabular-nums text-slate-800">
+              OCR pending {scanHealth?.pipeline?.ocrPending ?? 0} · unduh{" "}
+              {scanHealth?.pipeline?.downloading ?? 0} · antri{" "}
+              {scanHealth?.pipeline?.queued ?? 0}
+            </p>
+            <p className="mt-0.5 text-slate-500">
+              OCR selesai {scanHealth?.pipeline?.ocrDone ?? 0} (reconcile tiap{" "}
+              {Math.round(
+                (scanHealth?.throughput?.ocrReconcileIntervalMs ?? 15000) /
+                  1000
+              )}
+              s)
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
             <p className="font-medium text-slate-600">Redis</p>
             <p className="mt-1 text-slate-800">
               {scanHealth?.redis.usedMemoryHuman ?? "-"} /{" "}
@@ -323,6 +372,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
             </p>
             {scanHealth?.pgJobCounts && scanHealth.pgJobCounts.length > 0 && (
               <p className="mt-0.5 text-slate-500">
+                Job DB:{" "}
                 {scanHealth.pgJobCounts
                   .map((r) => `${r.status}: ${r.count}`)
                   .join(" · ")}
@@ -635,34 +685,22 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
           </div>
         </div>
         <div className="space-y-5 p-6">
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-teal-200 bg-teal-50/60 px-4 py-4">
+          <div
+            className={cn(
+              "flex flex-wrap items-center justify-between gap-4 rounded-lg border px-4 py-4",
+              settings.autoScanEnabled
+                ? "border-teal-200 bg-teal-50/60"
+                : "border-slate-200 bg-slate-50/60"
+            )}
+          >
             <div>
               <p className="text-sm font-medium text-slate-800">
-                Jalankan sekarang
+                Sync otomatis
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                Satu klik untuk semua user dengan kredensial Bappenas. User yang
-                punya job aktif dilewati.
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={triggeringAll || savingScan}
-              onClick={() => void triggerDeltaAll()}
-              className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-60"
-            >
-              <Play size={16} />
-              {triggeringAll ? "Memproses..." : "Sync semua user"}
-            </button>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-medium text-slate-800">
-                Jadwal otomatis
-              </p>
-              <p className="mt-1 text-xs text-slate-500">
-                Delta sync berulang untuk setiap user (rotate).
+                Aktifkan: sync semua user sekarang, lalu ulang sesuai interval.
+                Matikan: hentikan jadwal, batalkan job aktif, dan bersihkan
+                antrean (file OCR yang sudah dikirim tetap diproses).
               </p>
             </div>
             <button
@@ -670,11 +708,7 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
               role="switch"
               aria-checked={settings.autoScanEnabled}
               disabled={savingScan}
-              onClick={() =>
-                void saveSettings({
-                  autoScanEnabled: !settings.autoScanEnabled,
-                })
-              }
+              onClick={() => void toggleAutoSync()}
               className={cn(
                 "relative h-7 w-12 shrink-0 rounded-full transition-colors",
                 settings.autoScanEnabled ? "bg-teal-600" : "bg-slate-300",
@@ -721,11 +755,6 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
               <dt className="font-medium text-slate-500">Jadwal</dt>
               <dd>
                 {schedulerActive ? "Aktif" : "Nonaktif"}
-                {settings.envForceEnabled && (
-                  <span className="ml-1 text-amber-700">
-                    (env AUTO_SCAN_ENABLED)
-                  </span>
-                )}
               </dd>
             </div>
             <div>

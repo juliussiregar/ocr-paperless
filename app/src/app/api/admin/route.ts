@@ -9,6 +9,8 @@ import {
   getAutoScanSettings,
   updateAutoScanSettings,
 } from "@/lib/app-settings";
+import { triggerDeltaSyncForAllUsers } from "@/lib/admin-sync-trigger";
+import { cancelAllRunningSyncJobs } from "@/lib/admin-sync-cancel";
 
 export async function GET() {
   const { error } = await requireAdminApi();
@@ -68,7 +70,35 @@ export async function POST(request: NextRequest) {
     await writeAudit("settings.auto_scan", session!.user.id, {
       ...patch,
     });
-    return NextResponse.json({ settings });
+
+    let syncTrigger: Awaited<ReturnType<typeof triggerDeltaSyncForAllUsers>> | null =
+      null;
+    let syncTriggerError: string | null = null;
+    let syncCancel: Awaited<ReturnType<typeof cancelAllRunningSyncJobs>> | null =
+      null;
+
+    if (patch.autoScanEnabled === true) {
+      try {
+        syncTrigger = await triggerDeltaSyncForAllUsers(session!.user.id);
+      } catch (err) {
+        syncTriggerError =
+          err instanceof Error ? err.message : "Gagal memulai sync sekarang";
+      }
+    }
+
+    if (patch.autoScanEnabled === false) {
+      syncCancel = await cancelAllRunningSyncJobs(
+        session!.user.id,
+        "Sync otomatis dimatikan dari Admin"
+      );
+    }
+
+    return NextResponse.json({
+      settings,
+      syncTrigger,
+      syncTriggerError,
+      syncCancel,
+    });
   }
 
   if (action === "createUser") {
