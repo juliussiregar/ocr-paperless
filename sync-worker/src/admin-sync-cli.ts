@@ -281,6 +281,13 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
     }
 
     const preferQueue = pendingDownload > 0;
+    // If only OCR backlog remains, skip cloud walk: Paperless + reconcile continue.
+    if (!preferQueue && ocrPending > 0) {
+      console.log(
+        `[sync-restart] ${user.email}: unduh kosong, OCR pending=${ocrPending} → skip walk`
+      );
+      continue;
+    }
     const job = await prisma.scanJob.create({
       data: {
         status: ScanJobStatus.PENDING,
