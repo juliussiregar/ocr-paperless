@@ -60,7 +60,7 @@ import {
   FolderStatusChip,
 } from "@/components/FolderSyncVisual";
 import { formatSize } from "@/lib/format-size";
-import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint-types";
 
 type IngestStatus = "not_ingested" | "processing" | "done" | "failed" | null;
 

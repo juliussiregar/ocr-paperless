@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { humanizeFileName } from "@/lib/display-name";
 import { formatSize } from "@/lib/format-size";
-import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint-types";
 import type { FolderStats } from "@/lib/folder-stats";
 import {
   FolderStatusChip,

@@ -1,25 +1,12 @@
 import type { CloudEntry } from "@/lib/webdav";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint-types";
 import {
   getCachedListing,
   getCachedSubtreeHint,
   storeCachedSubtreeHint,
 } from "@/lib/cloud-listing-cache";
 
-export type CloudFolderHint = {
-  isEmpty: boolean;
-  /** Ingestible documents in immediate listing (not recursive). */
-  docCount: number;
-  totalDocSize: number;
-  zeroByteDocs: number;
-  dirCount: number;
-  fileCount: number;
-  /** Legacy aliases (same as docCount / totalDocSize). */
-  pdfCount: number;
-  totalPdfSize: number;
-  zeroBytePdfs: number;
-  /** True when subtree counts include all cached subfolders. */
-  recursiveComplete?: boolean;
-};
+export type { CloudFolderHint };
 
 export function emptyCloudFolderHint(): CloudFolderHint {
   return {
@@ -137,20 +124,3 @@ export async function aggregateCachedSubtreeHint(
   return result;
 }
 
-/** Readiness: siap vs total cloud (recursive when hint available). */
-export function folderSiapMetrics(
-  stats: {
-    pdfCount: number;
-    scannedCount: number;
-  } | null,
-  cloudHint: CloudFolderHint | null
-): { done: number; total: number; pct: number; cloudKnown: boolean } | null {
-  const tracked = stats?.pdfCount ?? 0;
-  const done = stats?.scannedCount ?? 0;
-  const cloudTotal = cloudHint?.docCount ?? 0;
-  const cloudKnown = cloudTotal > 0;
-  const total = cloudKnown ? Math.max(tracked, cloudTotal) : tracked;
-  if (total === 0) return null;
-  const pct = Math.min(100, Math.round((done / total) * 100));
-  return { done, total, pct, cloudKnown };
-}

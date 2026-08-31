@@ -11,8 +11,8 @@ import {
   Minus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
-import { folderSiapMetrics } from "@/lib/cloud-folder-hint";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint-types";
+import { folderSiapMetrics } from "@/lib/folder-visual";
 import type { FolderStats } from "@/lib/folder-stats";
 import {
   FOLDER_VISUAL_LABELS,

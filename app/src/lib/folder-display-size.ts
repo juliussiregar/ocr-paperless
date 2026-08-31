@@ -1,4 +1,4 @@
-import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint-types";
 import type { FolderStats } from "@/lib/folder-stats";
 
 /** Best available folder size: max of tracked subtree vs cached cloud listing. */
