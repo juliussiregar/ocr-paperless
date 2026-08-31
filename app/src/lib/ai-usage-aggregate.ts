@@ -12,7 +12,11 @@ const KEY_CHAT_EVENTS = "ai_lifetime_chat_events";
 const KEY_EMBED_HITS = "ai_lifetime_embedding_hits";
 const KEY_BACKFILLED = "ai_lifetime_backfilled_v1";
 
-const AI_AUDIT_ACTIONS = new Set(["chat.ask", "chat.whatsapp"]);
+const AI_AUDIT_ACTIONS = new Set([
+  "chat.ask",
+  "chat.whatsapp",
+  "embed.index",
+]);
 
 function parseIntSetting(value: string | undefined | null): number {
   const n = Number(value ?? 0);
@@ -201,7 +205,7 @@ export async function aggregateAiUsageSince(since: Date): Promise<AiUsageSummary
       ), 0)::int AS embedding_hits
     FROM audit_logs
     WHERE created_at >= ${since}
-      AND action IN ('chat.ask', 'chat.whatsapp')
+      AND action IN ('chat.ask', 'chat.whatsapp', 'embed.index')
   `;
 
   const row = rows[0];
@@ -257,7 +261,7 @@ export async function backfillLifetimeFromAuditIfNeeded(): Promise<void> {
         END
       ), 0)::int AS embedding_hits
     FROM audit_logs
-    WHERE action IN ('chat.ask', 'chat.whatsapp')
+    WHERE action IN ('chat.ask', 'chat.whatsapp', 'embed.index')
   `;
 
   const row = rows[0];

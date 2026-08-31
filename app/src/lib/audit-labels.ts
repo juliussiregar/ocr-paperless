@@ -19,6 +19,11 @@ const LABELS: Record<
     category: "ai",
     description: "Mengajukan pertanyaan ke asisten dokumen",
   },
+  "embed.index": {
+    title: "Embedding dokumen",
+    category: "ai",
+    description: "Index embedding untuk Ask (biaya OpenAI)",
+  },
   "chat.feedback": {
     title: "Feedback Ask AI",
     category: "ai",

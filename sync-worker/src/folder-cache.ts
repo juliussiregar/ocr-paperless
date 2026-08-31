@@ -5,6 +5,32 @@ export type FolderSnapshotRow = {
   dirEtag: string | null;
 };
 
+function folderUpsertConcurrency(): number {
+  const n = Number(process.env.FOLDER_SNAPSHOT_UPSERT_CONCURRENCY ?? "4");
+  if (!Number.isFinite(n)) return 4;
+  return Math.min(16, Math.max(1, Math.floor(n)));
+}
+
+let upsertActive = 0;
+const upsertWaiters: Array<() => void> = [];
+
+async function withFolderUpsertSlot<T>(fn: () => Promise<T>): Promise<T> {
+  const max = folderUpsertConcurrency();
+  if (upsertActive >= max) {
+    await new Promise<void>((resolve) => {
+      upsertWaiters.push(resolve);
+    });
+  }
+  upsertActive += 1;
+  try {
+    return await fn();
+  } finally {
+    upsertActive -= 1;
+    const next = upsertWaiters.shift();
+    if (next) next();
+  }
+}
+
 export async function loadFolderSnapshots(
   userId: string,
   rootPrefix: string | null
@@ -43,21 +69,23 @@ export async function upsertFolderSnapshot(
   dirLastModified: Date | null,
   dirEtag: string | null
 ): Promise<void> {
-  await prisma.cloudFolderSnapshot.upsert({
-    where: { userId_folderPath: { userId, folderPath } },
-    create: {
-      userId,
-      folderPath,
-      dirLastModified,
-      dirEtag,
-      lastListedAt: new Date(),
-    },
-    update: {
-      dirLastModified,
-      dirEtag,
-      lastListedAt: new Date(),
-    },
-  });
+  await withFolderUpsertSlot(() =>
+    prisma.cloudFolderSnapshot.upsert({
+      where: { userId_folderPath: { userId, folderPath } },
+      create: {
+        userId,
+        folderPath,
+        dirLastModified,
+        dirEtag,
+        lastListedAt: new Date(),
+      },
+      update: {
+        dirLastModified,
+        dirEtag,
+        lastListedAt: new Date(),
+      },
+    })
+  );
 }
 
 export function shouldSkipFolderListing(

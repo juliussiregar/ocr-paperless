@@ -299,8 +299,11 @@ export function AdminAuditPanel() {
             </p>
             <p className="mt-1 text-[11px] text-slate-500">
               {formatTokens(lifetime?.totalTokens ?? 0)} token total
+              {(lifetime?.embeddingTokens ?? 0) > 0
+                ? ` · embed ${formatTokens(lifetime!.embeddingTokens)}`
+                : ""}
               {(lifetime?.embeddingHits ?? 0) > 0
-                ? ` · ${lifetime!.embeddingHits} embed`
+                ? ` · ${lifetime!.embeddingHits} dokumen`
                 : ""}
             </p>
             {period && (

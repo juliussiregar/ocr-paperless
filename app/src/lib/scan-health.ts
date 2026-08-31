@@ -193,7 +193,7 @@ export async function getScanHealth(): Promise<ScanHealth> {
       scanMaxFiles: numEnv("SCAN_MAX_FILES", 750),
       discoverConcurrency: numEnv("SCAN_DISCOVER_CONCURRENCY", 8),
       ingestConcurrency: numEnv("SCAN_INGEST_CONCURRENCY", 8),
-      webdavDiscoveryConcurrency: numEnv("WEBDAV_DISCOVERY_CONCURRENCY", 32),
+      webdavDiscoveryConcurrency: numEnv("WEBDAV_DISCOVERY_CONCURRENCY", 16),
       webdavDownloadConcurrency: numEnv("WEBDAV_DOWNLOAD_CONCURRENCY", 10),
       ocrReconcileIntervalMs: numEnv("OCR_RECONCILE_INTERVAL_MS", 5000),
       embedBackfillBatch: numEnv("EMBED_BACKFILL_BATCH", 35),

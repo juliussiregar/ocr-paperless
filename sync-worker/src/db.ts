@@ -1,6 +1,14 @@
 import { PrismaClient } from "@prisma/client";
+import { prismaDatabaseUrl } from "./prisma-url.js";
 
-export const prisma = new PrismaClient();
+/** Default pool small: Paperless + app share the same Postgres (max_connections). */
+const datasourceUrl = prismaDatabaseUrl(process.env.DATABASE_URL, 12);
+
+export const prisma = new PrismaClient(
+  datasourceUrl
+    ? { datasources: { db: { url: datasourceUrl } } }
+    : undefined
+);
 
 export async function getUserCloudCredentials(userId: string): Promise<{
   url: string;

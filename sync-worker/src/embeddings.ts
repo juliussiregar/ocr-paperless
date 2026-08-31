@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { getPaperlessDocumentContent } from "./paperless.js";
+import { recordDocumentEmbedUsage } from "./embed-audit.js";
 
 const CHUNK_SIZE = envChunkSize();
 const CHUNK_OVERLAP = envChunkOverlap();
@@ -82,11 +83,16 @@ function isConfigured(): boolean {
   return key.startsWith("sk-");
 }
 
-async function embedTexts(texts: string[]): Promise<number[][]> {
+async function embedTexts(
+  texts: string[]
+): Promise<{ vectors: number[][]; tokens: number }> {
   const apiKey = process.env.OPENAI_API_KEY ?? "";
-  if (!apiKey.startsWith("sk-") || texts.length === 0) return [];
+  if (!apiKey.startsWith("sk-") || texts.length === 0) {
+    return { vectors: [], tokens: 0 };
+  }
 
   const out: number[][] = [];
+  let tokens = 0;
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
     let lastErr: Error | null = null;
@@ -121,16 +127,24 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
 
       const data = (await res.json()) as {
         data: Array<{ embedding: number[]; index: number }>;
+        usage?: { prompt_tokens?: number; total_tokens?: number };
       };
       const sorted = [...data.data].sort((a, b) => a.index - b.index);
       for (const row of sorted) out.push(row.embedding);
+      const usageTokens =
+        typeof data.usage?.total_tokens === "number"
+          ? data.usage.total_tokens
+          : typeof data.usage?.prompt_tokens === "number"
+            ? data.usage.prompt_tokens
+            : batch.reduce((n, t) => n + estimateTokens(t), 0);
+      tokens += usageTokens;
       lastErr = null;
       break;
     }
 
     if (lastErr) throw lastErr;
   }
-  return out;
+  return { vectors: out, tokens };
 }
 
 async function cloneChunksFromPeer(opts: {
@@ -236,8 +250,8 @@ export async function indexDocumentChunks(opts: {
   const parts = chunkText(content);
   if (parts.length === 0) return { chunks: 0, skipped: "empty_chunks" };
 
-  const embeddings = await embedTexts(parts.map((p) => p.slice(0, 8000)));
-  if (embeddings.length !== parts.length) {
+  const embedded = await embedTexts(parts.map((p) => p.slice(0, 8000)));
+  if (embedded.vectors.length !== parts.length) {
     throw new Error("Embedding count mismatch");
   }
 
@@ -257,7 +271,7 @@ export async function indexDocumentChunks(opts: {
             paperlessDocumentId: opts.paperlessDocumentId,
             chunkIndex: i,
             content: parts[i]!,
-            embedding: embeddings[i]!,
+            embedding: embedded.vectors[i]!,
             tokenEstimate: estimateTokens(parts[i]!),
             contentHash,
           },
@@ -266,6 +280,15 @@ export async function indexDocumentChunks(opts: {
     },
     { timeout: EMBED_TX_TIMEOUT_MS, maxWait: 15_000 }
   );
+
+  await recordDocumentEmbedUsage({
+    userId: opts.userId,
+    paperlessDocumentId: opts.paperlessDocumentId,
+    syncFileId: opts.syncFileId,
+    chunks: parts.length,
+    embeddingTokens: embedded.tokens,
+    model: embeddingModel(),
+  });
 
   return { chunks: parts.length };
 }

@@ -1,11 +1,17 @@
 import { PrismaClient } from "@prisma/client";
+import { prismaDatabaseUrl } from "@/lib/prisma-url";
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
+/** Keep app pool modest; live poll + API share one client. */
 function createPrismaClient() {
+  const datasourceUrl = prismaDatabaseUrl(process.env.DATABASE_URL, 8);
   return new PrismaClient({
+    ...(datasourceUrl
+      ? { datasources: { db: { url: datasourceUrl } } }
+      : {}),
     log:
       process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });

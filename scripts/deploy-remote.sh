@@ -47,6 +47,7 @@ remote_deploy() {
   append_env_if_missing INGEST_AUTO_RETRY_MAX 1
 
   upsert_env POSTGRES_MEM_LIMIT 1536m
+  append_env_if_missing POSTGRES_MAX_CONNECTIONS 200
   upsert_env REDIS_MEM_LIMIT 512m
   upsert_env REDIS_MAXMEMORY 512mb
   upsert_env REDIS_MAXMEMORY_POLICY noeviction
@@ -60,8 +61,12 @@ remote_deploy() {
   upsert_env SCAN_MAX_FILES 750
   upsert_env SCAN_DISCOVER_CONCURRENCY 8
   upsert_env SCAN_INGEST_CONCURRENCY 8
-  upsert_env WEBDAV_DISCOVERY_CONCURRENCY 32
+  upsert_env WEBDAV_DISCOVERY_CONCURRENCY 16
   upsert_env WEBDAV_DOWNLOAD_CONCURRENCY 10
+  append_env_if_missing PRISMA_CONNECTION_LIMIT_APP 8
+  append_env_if_missing PRISMA_CONNECTION_LIMIT_WORKER 12
+  append_env_if_missing PRISMA_POOL_TIMEOUT 30
+  append_env_if_missing FOLDER_SNAPSHOT_UPSERT_CONCURRENCY 4
   upsert_env POST_SYNC_WARM_ENABLED true
   upsert_env POST_SYNC_WARM_MAX_DIRS 40
   upsert_env OCR_RECONCILE_INTERVAL_MS 5000
@@ -76,8 +81,8 @@ remote_deploy() {
   docker compose build sync-worker
   docker compose build app
 
-  echo "==> recreate infra + app + worker (mem limits & env)"
-  docker compose up -d --force-recreate redis paperless app sync-worker
+  echo "==> recreate postgres (max_connections) + redis + paperless + app + worker"
+  docker compose up -d --force-recreate postgres redis paperless app sync-worker
 
   echo "==> wait for app health + schema sync"
   for _ in $(seq 1 40); do
