@@ -4,14 +4,14 @@ import { getUserBappenasCreds } from "@/lib/bappenas";
 import { rateLimit } from "@/lib/rate-limit";
 import {
   emptyCloudFolderHint,
-  summarizeCloudFolder,
+  aggregateCachedSubtreeHint,
 } from "@/lib/cloud-folder-hint";
 import {
   fetchDirectoryListing,
   getCachedListing,
 } from "@/lib/cloud-listing-cache";
 
-/** Immediate cloud listing stats for one folder (lazy, on hover). */
+/** Recursive cloud stats for one folder (from listing cache). */
 export async function GET(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -53,25 +53,17 @@ export async function GET(request: NextRequest) {
 
   try {
     const cached = await getCachedListing(session.user.id, path);
-    let children;
-    let listingCached = false;
-
-    if (cached) {
-      children = cached.entries;
-      listingCached = true;
-    } else {
-      const listing = await fetchDirectoryListing(
-        session.user.id,
-        path,
-        creds,
-        { refresh: false }
-      );
-      children = listing.entries;
-      listingCached = listing.listingCached;
+    if (!cached) {
+      await fetchDirectoryListing(session.user.id, path, creds, {
+        refresh: false,
+      });
     }
-
-    const hint = summarizeCloudFolder(children);
-    return NextResponse.json({ path, hint, listingCached });
+    const hint = await aggregateCachedSubtreeHint(session.user.id, path);
+    return NextResponse.json({
+      path,
+      hint,
+      listingCached: Boolean(cached) || hint.recursiveComplete,
+    });
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Gagal membaca folder cloud";

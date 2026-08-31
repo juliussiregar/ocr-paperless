@@ -30,6 +30,13 @@ import type { ChatCitation } from "@/lib/openai";
 import type { ChatScope } from "@/lib/chat-scope";
 import { citationLabel, humanizeFileName } from "@/lib/display-name";
 import { SafeMarkdown } from "@/components/SafeMarkdown";
+import {
+  PREVIEW_DEFAULT,
+  PreviewResizeHandle,
+  createPreviewResizeHandler,
+  readStoredPreviewWidth,
+  storePreviewWidth,
+} from "@/components/DocumentPreviewSheet";
 type UiMessage = {
   id?: string;
   role: "user" | "assistant";
@@ -157,12 +164,14 @@ function SourcesPanel({
   onSelect,
   onClose,
   className,
+  panelWidth,
 }: {
   docs: RailDoc[];
   previewId: number | null;
   onSelect: (id: number) => void;
   onClose: () => void;
   className?: string;
+  panelWidth?: number;
 }) {
   const activeIndex = docs.findIndex((d) => d.id === previewId);
   const hasNav = docs.length > 1;
@@ -181,7 +190,7 @@ function SourcesPanel({
 
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
-      <div className="flex items-center justify-between gap-2 px-4 py-3">
+      <div className="flex items-center justify-between gap-2 px-4 py-3 pl-5">
         <div className="min-w-0">
           <p className="auth-display text-sm font-bold text-[var(--auth-ink)]">
             Sumber
@@ -298,6 +307,11 @@ function SourcesPanel({
                 <Download size={12} />
                 Unduh
               </a>
+              {panelWidth != null && (
+                <span className="hidden text-[10px] tabular-nums text-[var(--auth-ink)]/30 sm:inline">
+                  {Math.round(panelWidth)}px
+                </span>
+              )}
             </div>
             <iframe
               key={previewId}
@@ -347,6 +361,8 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   const [mentionRemote, setMentionRemote] = useState<ContextDoc[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
   const [previewId, setPreviewId] = useState<number | null>(null);
+  const [previewWidth, setPreviewWidth] = useState(PREVIEW_DEFAULT);
+  const [previewResizing, setPreviewResizing] = useState(false);
   const [lastFocusIds, setLastFocusIds] = useState<number[]>([]);
   const [railDocs, setRailDocs] = useState<RailDoc[]>([]);
 
@@ -427,6 +443,24 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
 
     return scored.slice(0, 8).map((x) => x.d);
   }, [mentionOpen, mentionQuery, docs, pinned, mentionRemote]);
+
+  useEffect(() => {
+    setPreviewWidth(readStoredPreviewWidth());
+  }, []);
+
+  const startPreviewResize = useCallback(
+    createPreviewResizeHandler(
+      previewWidth,
+      setPreviewWidth,
+      setPreviewResizing
+    ),
+    [previewWidth]
+  );
+
+  const resetPreviewWidth = useCallback(() => {
+    setPreviewWidth(PREVIEW_DEFAULT);
+    storePreviewWidth(PREVIEW_DEFAULT);
+  }, []);
 
   useEffect(() => {
     if (!mentionOpen) return;
@@ -1519,17 +1553,28 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
 
       {/* Desktop sources rail */}
       {showDesktopRail && (
-        <aside className="hidden w-[min(100%,340px)] shrink-0 flex-col border-l border-[var(--auth-ink)]/[0.08] bg-white/60 backdrop-blur-sm lg:flex">
+        <aside
+          className={cn(
+            "relative hidden max-w-[96vw] shrink-0 flex-col border-l border-[var(--auth-ink)]/[0.08] bg-white/60 backdrop-blur-sm lg:flex",
+            previewResizing && "select-none"
+          )}
+          style={{ width: previewWidth }}
+        >
+          <PreviewResizeHandle
+            onResizeStart={startPreviewResize}
+            onResetWidth={resetPreviewWidth}
+            resizing={previewResizing}
+          />
           <SourcesPanel
             docs={panelDocs}
             previewId={previewId}
             onSelect={setPreviewId}
             onClose={() => setRailOpen(false)}
+            panelWidth={previewWidth}
           />
         </aside>
       )}
 
-      {/* Mobile sources sheet */}
       {mobileSourcesOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           <button

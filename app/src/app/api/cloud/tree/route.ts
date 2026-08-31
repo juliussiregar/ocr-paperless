@@ -3,12 +3,12 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getUserBappenasCreds } from "@/lib/bappenas";
 import { rateLimit } from "@/lib/rate-limit";
-import { buildFolderStatsMap, nestedSyncFileFilter } from "@/lib/folder-stats";
+import { buildFolderStatsMap, nestedSyncFileFilter, type FolderStats } from "@/lib/folder-stats";
+import { fetchDirectoryListing } from "@/lib/cloud-listing-cache";
 import {
-  fetchDirectoryListing,
-  getCachedListing,
-} from "@/lib/cloud-listing-cache";
-import { summarizeCloudFolder } from "@/lib/cloud-folder-hint";
+  aggregateCachedSubtreeHint,
+  type CloudFolderHint,
+} from "@/lib/cloud-folder-hint";
 import { folderDisplaySizeBytes } from "@/lib/folder-display-size";
 
 /** Shallow children of a folder for sidebar tree (folders + files). */
@@ -88,21 +88,16 @@ export async function GET(request: NextRequest) {
       nestedSyncRows
     );
 
-    const cachedHints = await Promise.all(
-      dirPaths.map(async (dirPath) => {
-        const cached = await getCachedListing(session.user.id, dirPath);
-        if (!cached) return null;
-        return {
-          path: dirPath,
-          hint: summarizeCloudFolder(cached.entries),
-        };
-      })
-    );
-    const hintByPath = new Map(
-      cachedHints
-        .filter((row): row is NonNullable<typeof row> => row != null)
-        .map((row) => [row.path, row.hint])
-    );
+    const hintMemo = new Map<string, CloudFolderHint>();
+    const hintByPath = new Map<string, CloudFolderHint>();
+    for (const dirPath of dirPaths) {
+      const hint = await aggregateCachedSubtreeHint(
+        session.user.id,
+        dirPath,
+        hintMemo
+      );
+      hintByPath.set(dirPath, hint);
+    }
 
     const folders = listed
       .filter((e) => e.type === "directory")
@@ -117,6 +112,8 @@ export async function GET(request: NextRequest) {
           isPdf: false,
           paperlessDocumentId: null as number | null,
           sizeBytes: folderDisplaySizeBytes(stats, hint),
+          folderStats: stats,
+          cloudHint: hint,
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
@@ -131,6 +128,8 @@ export async function GET(request: NextRequest) {
         isIngestible: Boolean(e.isIngestible),
         paperlessDocumentId: byPath.get(e.path)?.paperlessDocumentId ?? null,
         sizeBytes: e.size ?? null,
+        folderStats: null as FolderStats | null,
+        cloudHint: null as CloudFolderHint | null,
       }))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 

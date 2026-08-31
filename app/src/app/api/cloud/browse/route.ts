@@ -4,8 +4,11 @@ import { prisma } from "@/lib/prisma";
 import { getUserBappenasCreds, mapSyncStatusToUi } from "@/lib/bappenas";
 import { rateLimit } from "@/lib/rate-limit";
 import { buildFolderStatsMap, nestedSyncFileFilter } from "@/lib/folder-stats";
-import { fetchDirectoryListing, getCachedListing } from "@/lib/cloud-listing-cache";
-import { summarizeCloudFolder } from "@/lib/cloud-folder-hint";
+import { fetchDirectoryListing } from "@/lib/cloud-listing-cache";
+import {
+  aggregateCachedSubtreeHint,
+  type CloudFolderHint,
+} from "@/lib/cloud-folder-hint";
 import { folderDisplaySizeBytes } from "@/lib/folder-display-size";
 
 export async function GET(request: NextRequest) {
@@ -110,21 +113,16 @@ export async function GET(request: NextRequest) {
       nestedSyncRows
     );
 
-    const cachedHints = await Promise.all(
-      dirPaths.map(async (dirPath) => {
-        const cached = await getCachedListing(session.user.id, dirPath);
-        if (!cached) return null;
-        return {
-          path: dirPath,
-          hint: summarizeCloudFolder(cached.entries),
-        };
-      })
-    );
-    const hintByPath = new Map(
-      cachedHints
-        .filter((row): row is NonNullable<typeof row> => row != null)
-        .map((row) => [row.path, row.hint])
-    );
+    const hintMemo = new Map<string, Awaited<ReturnType<typeof aggregateCachedSubtreeHint>>>();
+    const hintByPath = new Map<string, CloudFolderHint>();
+    for (const dirPath of dirPaths) {
+      const hint = await aggregateCachedSubtreeHint(
+        session.user.id,
+        dirPath,
+        hintMemo
+      );
+      hintByPath.set(dirPath, hint);
+    }
 
     const items = entries.map((e) => {
       if (e.type === "directory") {

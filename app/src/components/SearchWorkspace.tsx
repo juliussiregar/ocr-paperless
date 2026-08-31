@@ -28,6 +28,14 @@ import { cn } from "@/lib/utils";
 import { humanizeFileName } from "@/lib/display-name";
 import { DocPreviewLink } from "@/components/DocPreviewLink";
 import { CloudSyncSummaryPanel } from "@/components/CloudSyncSummaryPanel";
+import {
+  DocumentPreviewSheet,
+  PREVIEW_DEFAULT,
+  PreviewResizeHandle,
+  createPreviewResizeHandler,
+  readStoredPreviewWidth,
+  storePreviewWidth,
+} from "@/components/DocumentPreviewSheet";
 
 type SearchHit = {
   id: number;
@@ -204,6 +212,8 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   const [history, setHistory] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [mobilePreview, setMobilePreview] = useState(false);
+  const [previewWidth, setPreviewWidth] = useState(PREVIEW_DEFAULT);
+  const [previewResizing, setPreviewResizing] = useState(false);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -225,12 +235,27 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
 
   useEffect(() => {
     setHistory(loadHistory());
+    setPreviewWidth(readStoredPreviewWidth());
     void fetch("/api/search?q=")
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data.folders)) setFolders(data.folders);
       })
       .catch(() => undefined);
+  }, []);
+
+  const startPreviewResize = useCallback(
+    createPreviewResizeHandler(
+      previewWidth,
+      setPreviewWidth,
+      setPreviewResizing
+    ),
+    [previewWidth]
+  );
+
+  const resetPreviewWidth = useCallback(() => {
+    setPreviewWidth(PREVIEW_DEFAULT);
+    storePreviewWidth(PREVIEW_DEFAULT);
   }, []);
 
   const syncUrl = useCallback(
@@ -987,10 +1012,21 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         </div>
       </section>
 
-      <aside className="hidden w-[min(100%,400px)] shrink-0 flex-col border-l border-[var(--auth-ink)]/[0.08] bg-white/70 backdrop-blur-sm lg:flex">
+      <aside
+        className={cn(
+          "relative hidden max-w-[96vw] shrink-0 flex-col border-l border-[var(--auth-ink)]/[0.08] bg-white/70 backdrop-blur-sm lg:flex",
+          previewResizing && "select-none"
+        )}
+        style={{ width: previewWidth }}
+      >
+        <PreviewResizeHandle
+          onResizeStart={startPreviewResize}
+          onResetWidth={resetPreviewWidth}
+          resizing={previewResizing}
+        />
         {selected ? (
           <>
-            <div className="space-y-2 border-b border-[var(--auth-ink)]/[0.06] px-4 py-3">
+            <div className="space-y-2 border-b border-[var(--auth-ink)]/[0.06] px-4 py-3 pl-5">
               <DocPreviewLink
                 docId={selected.id}
                 className="auth-display block text-sm font-bold leading-snug"
@@ -1021,6 +1057,9 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                   <Download size={12} />
                   Unduh
                 </a>
+                <span className="hidden text-[10px] tabular-nums text-[var(--auth-ink)]/30 sm:inline">
+                  {Math.round(previewWidth)}px
+                </span>
               </div>
             </div>
             <iframe
@@ -1030,7 +1069,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
             />
           </>
         ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center text-sm text-[var(--auth-ink)]/35">
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 pl-5 text-center text-sm text-[var(--auth-ink)]/35">
             <FileText size={28} className="opacity-40" />
             <p>Pilih dokumen untuk melihat preview di sini.</p>
           </div>
@@ -1038,47 +1077,14 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
       </aside>
 
       {mobilePreview && selected && (
-        <div className="fixed inset-0 z-40 lg:hidden">
-          <button
-            type="button"
-            className="absolute inset-0 bg-[var(--auth-ink)]/30"
-            aria-label="Tutup"
-            onClick={() => setMobilePreview(false)}
-          />
-          <div className="absolute inset-x-0 bottom-0 flex h-[82vh] flex-col rounded-t-2xl bg-white shadow-xl">
-            <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-[var(--auth-ink)]/15" />
-            <div className="flex items-start justify-between gap-3 px-4 py-3">
-              <div className="min-w-0">
-                <DocPreviewLink
-                  docId={selected.id}
-                  className="auth-display block truncate text-sm font-bold"
-                >
-                  {selected.displayName}
-                </DocPreviewLink>
-                <Link
-                  href={askAiHref(selected.id, folder || undefined)}
-                  className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-teal)]"
-                >
-                  <MessageSquare size={12} />
-                  Tanya Ask AI
-                </Link>
-              </div>
-              <button
-                type="button"
-                onClick={() => setMobilePreview(false)}
-                className="p-1.5 text-[var(--auth-ink)]/40"
-                aria-label="Tutup"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <iframe
-              title="Preview"
-              src={`/api/documents/${selected.id}/preview`}
-              className="min-h-0 w-full flex-1 bg-[var(--auth-paper)]"
-            />
-          </div>
-        </div>
+        <DocumentPreviewSheet
+          docId={selected.id}
+          onClose={() => setMobilePreview(false)}
+          width={previewWidth}
+          onResizeStart={startPreviewResize}
+          onResetWidth={resetPreviewWidth}
+          resizing={previewResizing}
+        />
       )}
     </div>
   );

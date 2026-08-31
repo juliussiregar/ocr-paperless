@@ -4,8 +4,10 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type MutableRefObject,
   type RefObject,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -13,11 +15,18 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
-  Folder,
   Loader2,
+  Search,
+  X,
 } from "lucide-react";
 import { humanizeFileName } from "@/lib/display-name";
 import { formatSize } from "@/lib/format-size";
+import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
+import type { FolderStats } from "@/lib/folder-stats";
+import {
+  FolderStatusChip,
+  FolderTreeIcon,
+} from "@/components/FolderSyncVisual";
 import { cn } from "@/lib/utils";
 
 type NodeKind = "directory" | "file";
@@ -29,6 +38,8 @@ type TreeNode = {
   isPdf?: boolean;
   paperlessDocumentId?: number | null;
   sizeBytes?: number | null;
+  folderStats?: FolderStats | null;
+  cloudHint?: CloudFolderHint | null;
   children?: TreeNode[];
   loaded?: boolean;
   loading?: boolean;
@@ -41,9 +52,14 @@ export type TreeFileOpen = {
   paperlessDocumentId: number | null;
 };
 
+export type FolderMetaEntry = {
+  folderStats: FolderStats | null;
+  cloudHint: CloudFolderHint | null;
+};
+
 const WIDTH_KEY = "cloud-browser:tree-width";
-const DEFAULT_WIDTH = 224;
-const MIN_WIDTH = 168;
+const DEFAULT_WIDTH = 240;
+const MIN_WIDTH = 180;
 const MAX_WIDTH = 480;
 
 function normalizePath(p: string): string {
@@ -103,18 +119,31 @@ function indentForDepth(depth: number): number {
   return 8 + 4 * 12 + 4 * 8 + (depth - 8) * 6;
 }
 
+function nodeMatchesFilter(node: TreeNode, query: string): boolean {
+  const q = query.toLowerCase();
+  const label = (node.kind === "directory" ? node.name : humanizeFileName(node.name)).toLowerCase();
+  return label.includes(q) || node.path.toLowerCase().includes(q);
+}
+
+function branchMatchesFilter(node: TreeNode, query: string): boolean {
+  if (!query) return true;
+  if (nodeMatchesFilter(node, query)) return true;
+  if (!node.children) return false;
+  return node.children.some((c) => branchMatchesFilter(c, query));
+}
+
 export function FolderTreeSidebar({
   currentPath,
   focusFilePath = null,
   syncKey = 0,
+  folderMetaCache,
   onOpenFolder,
   onOpenFile,
 }: {
   currentPath: string;
-  /** File path to highlight (e.g. from Recent / search). */
   focusFilePath?: string | null;
-  /** Bump on every navigation so tree re-reveals even if path unchanged. */
   syncKey?: number;
+  folderMetaCache?: MutableRefObject<Map<string, FolderMetaEntry>>;
   onOpenFolder: (path: string) => void;
   onOpenFile?: (file: TreeFileOpen) => void;
 }) {
@@ -130,6 +159,7 @@ export function FolderTreeSidebar({
   });
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const [dragging, setDragging] = useState(false);
+  const [filter, setFilter] = useState("");
   const rootRef = useRef(root);
   const inflightRef = useRef<Map<string, Promise<void>>>(new Map());
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -145,6 +175,19 @@ export function FolderTreeSidebar({
     widthRef.current = stored;
   }, []);
 
+  const applyMetaFromCache = useCallback(
+    (path: string, node: TreeNode): TreeNode => {
+      const meta = folderMetaCache?.current.get(path);
+      if (!meta) return node;
+      return {
+        ...node,
+        folderStats: meta.folderStats ?? node.folderStats,
+        cloudHint: meta.cloudHint ?? node.cloudHint,
+      };
+    },
+    [folderMetaCache]
+  );
+
   const loadChildren = useCallback(
     async (folderPath: string, force = false) => {
       const target = normalizePath(folderPath);
@@ -158,11 +201,9 @@ export function FolderTreeSidebar({
       if (pending) {
         await pending;
         if (!force) return;
-        // After pending finishes, continue with force reload below
       }
 
       const job = (async () => {
-        // Wait briefly for parent to appear (sequential ensure should add it)
         if (target !== "/") {
           let tries = 0;
           while (!findNode(rootRef.current, target) && tries < 8) {
@@ -185,6 +226,8 @@ export function FolderTreeSidebar({
             isPdf?: boolean;
             paperlessDocumentId?: number | null;
             sizeBytes?: number | null;
+            folderStats?: FolderStats | null;
+            cloudHint?: CloudFolderHint | null;
           };
 
           const rawEntries: RawEntry[] =
@@ -201,17 +244,27 @@ export function FolderTreeSidebar({
 
           const children: TreeNode[] = rawEntries.map((e) => {
             const kind: NodeKind = e.type === "file" ? "file" : "directory";
-            return {
-              path: normalizePath(e.path),
+            const pathNorm = normalizePath(e.path);
+            const node: TreeNode = {
+              path: pathNorm,
               name: e.name,
               kind,
               isPdf: Boolean(e.isPdf),
               paperlessDocumentId: e.paperlessDocumentId ?? null,
-              sizeBytes:
-                typeof e.sizeBytes === "number" ? e.sizeBytes : null,
+              sizeBytes: typeof e.sizeBytes === "number" ? e.sizeBytes : null,
+              folderStats: e.folderStats ?? null,
+              cloudHint: e.cloudHint ?? null,
               children: kind === "directory" ? [] : undefined,
               loaded: kind === "file" ? true : false,
             };
+            const merged = applyMetaFromCache(pathNorm, node);
+            if (folderMetaCache && kind === "directory") {
+              folderMetaCache.current.set(pathNorm, {
+                folderStats: merged.folderStats ?? null,
+                cloudHint: merged.cloudHint ?? null,
+              });
+            }
+            return merged;
           });
 
           setRoot((prev) => {
@@ -230,14 +283,12 @@ export function FolderTreeSidebar({
       inflightRef.current.set(target, job);
       await job;
     },
-    []
+    [applyMetaFromCache, folderMetaCache]
   );
 
-  // Whenever navigation happens: expand ancestors, load path, reload leaf, scroll into view
   useEffect(() => {
     const gen = ++ensureGenRef.current;
     const activePath = normalizePath(currentPath);
-    const focus = focusFilePath ? normalizePath(focusFilePath) : null;
     const ancestors = ancestorPaths(activePath);
 
     setExpanded((prev) => {
@@ -249,13 +300,10 @@ export function FolderTreeSidebar({
     void (async () => {
       for (let i = 0; i < ancestors.length; i++) {
         if (gen !== ensureGenRef.current) return;
-        const a = ancestors[i];
-        // Tree shares Redis listing cache with browse; no forced WebDAV refresh
-        await loadChildren(a, false);
+        await loadChildren(ancestors[i], syncKey > 0 && i === ancestors.length - 1);
       }
       if (gen !== ensureGenRef.current) return;
 
-      // Allow DOM to paint expanded + children, then scroll
       requestAnimationFrame(() => {
         scrollTargetRef.current?.scrollIntoView({
           block: "nearest",
@@ -265,6 +313,11 @@ export function FolderTreeSidebar({
       });
     })();
   }, [currentPath, focusFilePath, syncKey, loadChildren]);
+
+  useEffect(() => {
+    if (!folderMetaCache) return;
+    setRoot((prev) => patchMetaFromCache(prev, folderMetaCache.current));
+  }, [syncKey, folderMetaCache]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -305,6 +358,23 @@ export function FolderTreeSidebar({
     return () => window.removeEventListener("pagehide", flush);
   }, [dragging]);
 
+  const filterTrim = filter.trim();
+
+  const autoExpanded = useMemo(() => {
+    if (!filterTrim) return expanded;
+    const next = new Set(expanded);
+    function walk(nodes: TreeNode[]) {
+      for (const n of nodes) {
+        if (n.kind === "directory" && branchMatchesFilter(n, filterTrim)) {
+          next.add(n.path);
+        }
+        if (n.children) walk(n.children);
+      }
+    }
+    walk([root]);
+    return next;
+  }, [expanded, filterTrim, root]);
+
   function startResize(e: ReactPointerEvent<HTMLButtonElement>) {
     e.preventDefault();
     document.body.dataset.treeDragStartX = String(e.clientX);
@@ -335,6 +405,20 @@ export function FolderTreeSidebar({
     setExpanded(new Set(ancestorPaths(currentPath)));
   }
 
+  function expandAllLoaded() {
+    const next = new Set(expanded);
+    function walk(nodes: TreeNode[]) {
+      for (const n of nodes) {
+        if (n.kind === "directory" && n.loaded) {
+          next.add(n.path);
+          if (n.children) walk(n.children);
+        }
+      }
+    }
+    walk([root]);
+    setExpanded(next);
+  }
+
   function prefetch(node: TreeNode) {
     if (node.kind !== "directory" || node.loaded || node.loading) return;
     if (prefetchTimer.current) clearTimeout(prefetchTimer.current);
@@ -362,32 +446,64 @@ export function FolderTreeSidebar({
   return (
     <aside
       className={cn(
-        "relative hidden min-h-full shrink-0 self-stretch border-r border-[var(--auth-teal)]/12 bg-gradient-to-b from-white/80 via-[var(--auth-teal)]/[0.04] to-amber-50/30 lg:block",
+        "relative hidden min-h-full shrink-0 self-stretch border-r border-[var(--auth-teal)]/12 bg-gradient-to-b from-white/80 via-[var(--auth-teal)]/[0.04] to-amber-50/30 lg:flex lg:flex-col",
         dragging && "select-none"
       )}
       style={{ width }}
       aria-label="Folder tree"
     >
-      <div className="sticky top-0 z-[1] flex items-center justify-between gap-2 bg-gradient-to-b from-white via-white/95 to-transparent px-3 py-2.5">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-teal)]">
-          Browser
-        </p>
-        <button
-          type="button"
-          onClick={collapseToCurrent}
-          className="text-[10px] font-medium text-[var(--auth-ink)]/35 transition hover:text-[var(--auth-teal)]"
-          title="Collapse tree to current folder"
-        >
-          Collapse
-        </button>
+      <div className="sticky top-0 z-[1] space-y-2 border-b border-[var(--auth-teal)]/10 bg-gradient-to-b from-white via-white/95 to-transparent px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-teal)]">
+            Folder
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={expandAllLoaded}
+              className="text-[10px] font-medium text-[var(--auth-ink)]/35 transition hover:text-[var(--auth-teal)]"
+              title="Buka semua cabang yang sudah dimuat"
+            >
+              Buka
+            </button>
+            <button
+              type="button"
+              onClick={collapseToCurrent}
+              className="text-[10px] font-medium text-[var(--auth-ink)]/35 transition hover:text-[var(--auth-teal)]"
+              title="Tutup cabang di luar folder aktif"
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 rounded-md border border-[var(--auth-ink)]/10 bg-white/70 px-2 py-1">
+          <Search size={11} className="shrink-0 text-[var(--auth-ink)]/30" />
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Cari folder…"
+            className="min-w-0 flex-1 bg-transparent text-[11px] outline-none placeholder:text-[var(--auth-ink)]/30"
+          />
+          {filter && (
+            <button
+              type="button"
+              onClick={() => setFilter("")}
+              className="text-[var(--auth-ink)]/30 hover:text-[var(--auth-ink)]"
+              aria-label="Hapus filter"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="overflow-x-auto px-1 pb-10">
+      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-1 pb-10">
         <div className="min-w-max pr-2">
           <TreeRows
             nodes={[root]}
             depth={0}
-            expanded={expanded}
+            expanded={autoExpanded}
+            filter={filterTrim}
             currentPath={activePath}
             focusFilePath={activeFile}
             scrollTargetRef={scrollTargetRef}
@@ -400,8 +516,8 @@ export function FolderTreeSidebar({
 
       <button
         type="button"
-        aria-label="Resize folder panel"
-        title="Drag to resize (saved locally). Double-click to reset."
+        aria-label="Ubah lebar panel folder"
+        title="Geser untuk ubah lebar · double-click reset"
         onPointerDown={startResize}
         onDoubleClick={resetWidth}
         className={cn(
@@ -419,6 +535,7 @@ function TreeRows({
   nodes,
   depth,
   expanded,
+  filter,
   currentPath,
   focusFilePath,
   scrollTargetRef,
@@ -429,6 +546,7 @@ function TreeRows({
   nodes: TreeNode[];
   depth: number;
   expanded: Set<string>;
+  filter: string;
   currentPath: string;
   focusFilePath: string | null;
   scrollTargetRef: RefObject<HTMLElement | null>;
@@ -436,15 +554,20 @@ function TreeRows({
   onOpen: (n: TreeNode) => void;
   onPrefetch: (n: TreeNode) => void;
 }) {
+  const visible = filter
+    ? nodes.filter((n) => branchMatchesFilter(n, filter))
+    : nodes;
+
   return (
     <ul className="space-y-0.5">
-      {nodes.map((node) => {
+      {visible.map((node) => {
         const isDir = node.kind === "directory";
         const isOpen = isDir && expanded.has(node.path);
         const isCurrentFolder = isDir && currentPath === node.path;
         const isFocusedFile =
           !isDir && focusFilePath != null && focusFilePath === node.path;
-        const isScrollTarget = isFocusedFile || (isCurrentFolder && !focusFilePath);
+        const isScrollTarget =
+          isFocusedFile || (isCurrentFolder && !focusFilePath);
         const activeBranch =
           isCurrentFolder ||
           (isDir &&
@@ -479,7 +602,7 @@ function TreeRows({
                   type="button"
                   className="shrink-0 rounded-sm p-0.5 text-[var(--auth-ink)]/30 transition hover:text-[var(--auth-teal)]"
                   onClick={() => onToggle(node)}
-                  aria-label={isOpen ? "Collapse" : "Expand"}
+                  aria-label={isOpen ? "Tutup" : "Buka"}
                 >
                   {node.loading ? (
                     <Loader2 size={11} className="animate-spin" />
@@ -498,19 +621,16 @@ function TreeRows({
               )}
               <button
                 type="button"
-                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-0.5 text-left transition active:scale-[0.99]"
+                className="flex min-w-0 flex-1 items-center gap-1 rounded-sm py-0.5 text-left transition active:scale-[0.99]"
                 onClick={() => onOpen(node)}
                 title={node.path}
               >
                 {isDir ? (
-                  <Folder
-                    size={12}
-                    className={cn(
-                      "shrink-0 transition-colors duration-200",
-                      isCurrentFolder
-                        ? "text-[var(--auth-teal)]"
-                        : "text-amber-600/80"
-                    )}
+                  <FolderTreeIcon
+                    stats={node.folderStats ?? null}
+                    cloudHint={node.cloudHint ?? null}
+                    loading={node.loading}
+                    isCurrent={isCurrentFolder}
                   />
                 ) : (
                   <FileText
@@ -523,11 +643,20 @@ function TreeRows({
                     )}
                   />
                 )}
-                <span className="whitespace-nowrap">{label}</span>
+                <span className="min-w-0 truncate whitespace-nowrap">
+                  {label}
+                </span>
+                {isDir && (
+                  <FolderStatusChip
+                    stats={node.folderStats ?? null}
+                    cloudHint={node.cloudHint ?? null}
+                    compact
+                  />
+                )}
                 {node.sizeBytes != null && node.sizeBytes > 0 && (
                   <span
-                    className="ml-1 shrink-0 text-[10px] tabular-nums text-[var(--auth-ink)]/35"
-                    title="Ukuran folder"
+                    className="ml-auto shrink-0 text-[10px] tabular-nums text-[var(--auth-ink)]/35"
+                    title="Ukuran"
                   >
                     {formatSize(node.sizeBytes)}
                   </span>
@@ -540,6 +669,7 @@ function TreeRows({
                   nodes={node.children!}
                   depth={depth + 1}
                   expanded={expanded}
+                  filter={filter}
                   currentPath={currentPath}
                   focusFilePath={focusFilePath}
                   scrollTargetRef={scrollTargetRef}
@@ -589,5 +719,25 @@ function setChildren(
   return {
     ...node,
     children: node.children.map((c) => setChildren(c, target, children)),
+  };
+}
+
+function patchMetaFromCache(
+  node: TreeNode,
+  cache: Map<string, FolderMetaEntry>
+): TreeNode {
+  const meta = cache.get(node.path);
+  let next: TreeNode = node;
+  if (meta && node.kind === "directory") {
+    next = {
+      ...node,
+      folderStats: meta.folderStats ?? node.folderStats,
+      cloudHint: meta.cloudHint ?? node.cloudHint,
+    };
+  }
+  if (!next.children) return next;
+  return {
+    ...next,
+    children: next.children.map((c) => patchMetaFromCache(c, cache)),
   };
 }

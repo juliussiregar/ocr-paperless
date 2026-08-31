@@ -9,6 +9,44 @@ export const PREVIEW_MIN = 320;
 export const PREVIEW_MAX = 960;
 export const PREVIEW_DEFAULT = 480;
 
+interface PreviewResizeHandleProps {
+  onResizeStart: (e: React.MouseEvent) => void;
+  onResetWidth?: () => void;
+  resizing?: boolean;
+}
+
+export function PreviewResizeHandle({
+  onResizeStart,
+  onResetWidth,
+  resizing,
+}: PreviewResizeHandleProps) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Ubah lebar preview"
+      title="Geser untuk ubah lebar · double-click reset"
+      className={cn(
+        "group absolute inset-y-0 left-0 z-10 flex w-3 -translate-x-1/2 cursor-col-resize items-center justify-center border-0 bg-transparent",
+        resizing && "bg-[var(--auth-teal)]/15"
+      )}
+      onMouseDown={onResizeStart}
+      onDoubleClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onResetWidth?.();
+      }}
+    >
+      <span className="flex h-12 w-1.5 items-center justify-center rounded-full bg-[var(--auth-ink)]/10 transition group-hover:bg-[var(--auth-teal)]/35">
+        <GripVertical
+          size={12}
+          className="text-[var(--auth-ink)]/35 group-hover:text-[var(--auth-teal-deep)]"
+        />
+      </span>
+    </div>
+  );
+}
+
 interface DocumentPreviewSheetProps {
   docId: number;
   onClose: () => void;
@@ -38,29 +76,11 @@ export function DocumentPreviewSheet({
         className="absolute inset-y-0 right-0 flex max-w-[96vw] flex-col bg-white shadow-xl"
         style={{ width }}
       >
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Ubah lebar preview"
-          title="Geser untuk ubah lebar · double-click reset"
-          className={cn(
-            "group absolute inset-y-0 left-0 z-10 flex w-3 -translate-x-1/2 cursor-col-resize items-center justify-center border-0 bg-transparent",
-            resizing && "bg-[var(--auth-teal)]/15"
-          )}
-          onMouseDown={onResizeStart}
-          onDoubleClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onResetWidth?.();
-          }}
-        >
-          <span className="flex h-12 w-1.5 items-center justify-center rounded-full bg-[var(--auth-ink)]/10 transition group-hover:bg-[var(--auth-teal)]/35">
-            <GripVertical
-              size={12}
-              className="text-[var(--auth-ink)]/35 group-hover:text-[var(--auth-teal-deep)]"
-            />
-          </span>
-        </div>
+        <PreviewResizeHandle
+          onResizeStart={onResizeStart}
+          onResetWidth={onResetWidth}
+          resizing={resizing}
+        />
 
         <div className="flex items-center justify-between gap-3 border-b border-[var(--auth-ink)]/[0.06] px-4 py-3 pl-5">
           <div className="flex flex-wrap items-center gap-3 text-[12px]">

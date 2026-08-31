@@ -1,4 +1,9 @@
 import type { CloudEntry } from "@/lib/webdav";
+import {
+  getCachedListing,
+  getCachedSubtreeHint,
+  storeCachedSubtreeHint,
+} from "@/lib/cloud-listing-cache";
 
 export type CloudFolderHint = {
   isEmpty: boolean;
@@ -12,6 +17,8 @@ export type CloudFolderHint = {
   pdfCount: number;
   totalPdfSize: number;
   zeroBytePdfs: number;
+  /** True when subtree counts include all cached subfolders. */
+  recursiveComplete?: boolean;
 };
 
 export function emptyCloudFolderHint(): CloudFolderHint {
@@ -25,6 +32,7 @@ export function emptyCloudFolderHint(): CloudFolderHint {
     pdfCount: 0,
     totalPdfSize: 0,
     zeroBytePdfs: 0,
+    recursiveComplete: false,
   };
 }
 
@@ -59,5 +67,90 @@ export function summarizeCloudFolder(entries: CloudEntry[]): CloudFolderHint {
     pdfCount: docCount,
     totalPdfSize: totalDocSize,
     zeroBytePdfs: zeroByteDocs,
+    recursiveComplete: true,
   };
+}
+
+function normalizeFolderPath(path: string): string {
+  if (!path || path === "/") return "/";
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return p.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+}
+
+/** Sum ingestible docs in subtree using Redis listing cache (no WebDAV). */
+export async function aggregateCachedSubtreeHint(
+  userId: string,
+  folderPath: string,
+  memo?: Map<string, CloudFolderHint>
+): Promise<CloudFolderHint> {
+  const norm = normalizeFolderPath(folderPath);
+  const cache = memo ?? new Map<string, CloudFolderHint>();
+  if (cache.has(norm)) return cache.get(norm)!;
+
+  const redisRaw = await getCachedSubtreeHint(userId, norm);
+  if (redisRaw && typeof redisRaw.docCount === "number") {
+    const parsed = redisRaw as unknown as CloudFolderHint;
+    cache.set(norm, parsed);
+    return parsed;
+  }
+
+  const empty = { ...emptyCloudFolderHint(), recursiveComplete: false };
+  const cached = await getCachedListing(userId, norm);
+  if (!cached) {
+    cache.set(norm, empty);
+    return empty;
+  }
+
+  const immediate = summarizeCloudFolder(cached.entries);
+  let docCount = immediate.docCount;
+  let totalDocSize = immediate.totalDocSize;
+  let zeroByteDocs = immediate.zeroByteDocs;
+  let dirCount = immediate.dirCount;
+  let fileCount = immediate.fileCount;
+  let recursiveComplete = true;
+
+  for (const entry of cached.entries) {
+    if (entry.type !== "directory") continue;
+    const sub = await aggregateCachedSubtreeHint(userId, entry.path, cache);
+    docCount += sub.docCount;
+    totalDocSize += sub.totalDocSize;
+    zeroByteDocs += sub.zeroByteDocs;
+    if (!sub.recursiveComplete) recursiveComplete = false;
+  }
+
+  const result: CloudFolderHint = {
+    isEmpty: docCount === 0 && dirCount === 0,
+    docCount,
+    totalDocSize,
+    zeroByteDocs,
+    dirCount,
+    fileCount,
+    pdfCount: docCount,
+    totalPdfSize: totalDocSize,
+    zeroBytePdfs: zeroByteDocs,
+    recursiveComplete,
+  };
+  cache.set(norm, result);
+  if (recursiveComplete) {
+    await storeCachedSubtreeHint(userId, norm, result);
+  }
+  return result;
+}
+
+/** Readiness: siap vs total cloud (recursive when hint available). */
+export function folderSiapMetrics(
+  stats: {
+    pdfCount: number;
+    scannedCount: number;
+  } | null,
+  cloudHint: CloudFolderHint | null
+): { done: number; total: number; pct: number; cloudKnown: boolean } | null {
+  const tracked = stats?.pdfCount ?? 0;
+  const done = stats?.scannedCount ?? 0;
+  const cloudTotal = cloudHint?.docCount ?? 0;
+  const cloudKnown = cloudTotal > 0;
+  const total = cloudKnown ? Math.max(tracked, cloudTotal) : tracked;
+  if (total === 0) return null;
+  const pct = Math.min(100, Math.round((done / total) * 100));
+  return { done, total, pct, cloudKnown };
 }

@@ -37,6 +37,78 @@ function listingTtlSec(): number {
   return Number.isFinite(n) && n > 30 ? Math.floor(n) : 600;
 }
 
+export { listingTtlSec };
+
+function subtreeHintKey(userId: string, path: string): string {
+  const norm = normalizeListingPath(path);
+  return `cloud:subtree-hint:${userId}:${encodeURIComponent(norm)}`;
+}
+
+export async function getCachedSubtreeHint(
+  userId: string,
+  path: string
+): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await getRedis().get(subtreeHintKey(userId, path));
+    if (!raw) return null;
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export async function storeCachedSubtreeHint(
+  userId: string,
+  path: string,
+  hint: Record<string, unknown>
+): Promise<void> {
+  const ttl = listingTtlSec();
+  await getRedis().set(
+    subtreeHintKey(userId, path),
+    JSON.stringify(hint),
+    "EX",
+    ttl
+  );
+}
+
+export async function invalidateSubtreeHintCache(
+  userId: string,
+  paths: string[]
+): Promise<void> {
+  if (paths.length === 0) return;
+  const keys = paths.map((p) => subtreeHintKey(userId, p));
+  await getRedis().del(...keys);
+}
+
+export async function warmListingCaches(
+  userId: string,
+  paths: string[],
+  creds: { url: string; username: string; password: string },
+  options?: { max?: number }
+): Promise<{ warmed: string[]; cached: string[]; failed: string[] }> {
+  const max = Math.min(options?.max ?? 16, paths.length);
+  const warmed: string[] = [];
+  const cached: string[] = [];
+  const failed: string[] = [];
+
+  for (const raw of paths.slice(0, max)) {
+    const path = normalizeListingPath(raw);
+    try {
+      const existing = await getCachedListing(userId, path);
+      if (existing) {
+        cached.push(path);
+        continue;
+      }
+      await fetchDirectoryListing(userId, path, creds, { refresh: false });
+      warmed.push(path);
+    } catch {
+      failed.push(path);
+    }
+  }
+
+  return { warmed, cached, failed };
+}
+
 export async function getCachedListing(
   userId: string,
   path: string
@@ -149,5 +221,7 @@ export async function invalidateListingCache(
   userId: string,
   path: string
 ): Promise<void> {
-  await getRedis().del(cacheKey(userId, path));
+  const norm = normalizeListingPath(path);
+  await getRedis().del(cacheKey(userId, norm));
+  await invalidateSubtreeHintCache(userId, [norm]);
 }
