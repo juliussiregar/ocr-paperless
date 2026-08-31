@@ -85,6 +85,14 @@ export async function updateAutoScanSettings(input: {
   autoScanEnabled?: boolean;
   autoScanIntervalMinutes?: number;
 }): Promise<AutoScanSettings> {
+  if (input.autoScanEnabled === false) {
+    await prisma.appSetting.upsert({
+      where: { key: SETTING_AUTO_RETRY_ENABLED },
+      create: { key: SETTING_AUTO_RETRY_ENABLED, value: "false" },
+      update: { value: "false" },
+    });
+  }
+
   if (input.autoScanEnabled === true) {
     await applySyncOperationalDefaults();
   }

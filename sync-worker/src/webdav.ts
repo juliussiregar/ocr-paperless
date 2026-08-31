@@ -5,6 +5,7 @@ import { join } from "path";
 import { Readable } from "stream";
 import { createClient, type FileStat } from "webdav";
 import { isIngestibleFileName, isPdfFileName, fileCategoryFromName } from "./file-types.js";
+import { parseWebDavDate, parseWebDavDateIso } from "./webdav-dates.js";
 
 export type CloudEntry = {
   type: "directory" | "file";
@@ -91,22 +92,19 @@ function toRemoteFile(item: FileStat): RemoteFile {
     basename: item.basename,
     fileId: extractFileId(item),
     etag: normalizeEtag(item.etag),
-    lastModified: item.lastmod ? new Date(item.lastmod) : null,
+    lastModified: parseWebDavDate(item.lastmod),
     size: typeof item.size === "number" && Number.isFinite(item.size) ? item.size : null,
     mimeType: item.mime ?? null,
   };
 }
 
 function dirLastmodMs(item: FileStat): number {
-  if (!item.lastmod) return 0;
-  const t = new Date(item.lastmod).getTime();
-  return Number.isFinite(t) ? t : 0;
+  const d = parseWebDavDate(item.lastmod);
+  return d ? d.getTime() : 0;
 }
 
 function dirLastmodDate(item: FileStat): Date | null {
-  if (!item.lastmod) return null;
-  const d = new Date(item.lastmod);
-  return Number.isFinite(d.getTime()) ? d : null;
+  return parseWebDavDate(item.lastmod);
 }
 
 function fileLastmodMs(file: RemoteFile): number {
@@ -280,11 +278,14 @@ async function walkDocumentTree(options: {
         item.type === "directory" &&
         (item.filename === dir || item.filename === `${dir}/`)
     );
-    const dirLastmod = dirItem?.lastmod
-      ? new Date(dirItem.lastmod)
-      : dirMtime > 0
-        ? new Date(dirMtime)
-        : null;
+    const dirLastmod =
+      parseWebDavDate(dirItem?.lastmod) ??
+      (dirMtime > 0 && Number.isFinite(dirMtime)
+        ? (() => {
+            const d = new Date(dirMtime);
+            return Number.isFinite(d.getTime()) ? d : null;
+          })()
+        : null);
     const dirEtag = dirItem ? normalizeEtag(dirItem.etag) : null;
     await options.onDirListed?.(dir, dirLastmod, dirEtag);
 
@@ -654,9 +655,7 @@ export function createWebDavClient(
     );
     if (dirSelf) {
       dirEtag = normalizeEtag(dirSelf.etag);
-      dirLastModified = dirSelf.lastmod
-        ? new Date(dirSelf.lastmod).toISOString()
-        : null;
+      dirLastModified = parseWebDavDateIso(dirSelf.lastmod);
     }
 
     const entries: CloudEntry[] = [];
@@ -672,7 +671,7 @@ export function createWebDavClient(
         path: item.filename,
         name: item.basename,
         size: typeof item.size === "number" ? item.size : null,
-        lastModified: item.lastmod ? new Date(item.lastmod).toISOString() : null,
+        lastModified: parseWebDavDateIso(item.lastmod),
         mimeType: mime,
         isIngestible: ingestible,
         isPdf: item.type === "file" && isPdfFileName(item.basename, mime),

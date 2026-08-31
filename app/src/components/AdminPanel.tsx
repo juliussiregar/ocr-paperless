@@ -18,6 +18,7 @@ interface BacklogRow {
   userId: string;
   email: string;
   name: string | null;
+  hasBappenasCreds: boolean;
   lastDiscoveryAt: string | null;
   ocrDone: number;
   ocrPending: number;
@@ -433,6 +434,11 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
                     {row.name && (
                       <div className="text-slate-400">{row.name}</div>
                     )}
+                    {!row.hasBappenasCreds && (
+                      <div className="text-[10px] text-amber-700">
+                        Tanpa kredensial Bappenas
+                      </div>
+                    )}
                   </td>
                   <td className="py-2 pr-3">{row.ocrDone}</td>
                   <td className="py-2 pr-3">{row.ocrPending}</td>
@@ -471,28 +477,34 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
                       : "-"}
                   </td>
                   <td className="py-2">
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={
-                          triggeringUserId === row.userId || row.activeJob != null
-                        }
-                        onClick={() => void triggerDelta(row.userId)}
-                        className="rounded border border-teal-200 px-2 py-1 text-teal-700 hover:bg-teal-50 disabled:opacity-50"
-                      >
-                        Delta
-                      </button>
-                      <button
-                        type="button"
-                        disabled={
-                          triggeringUserId === row.userId || row.activeJob != null
-                        }
-                        onClick={() => void triggerDelta(row.userId, true)}
-                        className="rounded border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                      >
-                        Reconcile
-                      </button>
-                    </div>
+                    {row.hasBappenasCreds ? (
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={
+                            triggeringUserId === row.userId ||
+                            row.activeJob != null
+                          }
+                          onClick={() => void triggerDelta(row.userId)}
+                          className="rounded border border-teal-200 px-2 py-1 text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+                        >
+                          Delta
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            triggeringUserId === row.userId ||
+                            row.activeJob != null
+                          }
+                          onClick={() => void triggerDelta(row.userId, true)}
+                          className="rounded border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          Reconcile
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400">Tidak tersedia</span>
+                    )}
                   </td>
                 </tr>
               ))}

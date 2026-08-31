@@ -7,7 +7,7 @@ import { writeAudit } from "@/lib/audit";
 import { activeScanJobWhere } from "@/lib/scan-status";
 import { getAutoScanSettings } from "@/lib/app-settings";
 import { SYNC_ROOT_PATH, syncBatchSize } from "@/lib/sync-defaults";
-import { listUsersWithBappenasCreds } from "@/lib/bappenas";
+import { getUserBappenasCreds, listUsersWithBappenasCreds } from "@/lib/bappenas";
 import { getScanHealth, releaseUserScanLock } from "@/lib/scan-health";
 
 function ingestMaxRetries(): number {
@@ -20,6 +20,9 @@ export async function GET() {
   if (error) return error;
 
   const maxRetries = ingestMaxRetries();
+  const credsUserIds = new Set(
+    (await listUsersWithBappenasCreds()).map((u) => u.id)
+  );
   const users = await prisma.user.findMany({
     select: { id: true, email: true, name: true, lastDiscoveryAt: true },
     orderBy: { email: "asc" },
@@ -81,6 +84,7 @@ export async function GET() {
         userId: u.id,
         email: u.email,
         name: u.name,
+        hasBappenasCreds: credsUserIds.has(u.id),
         lastDiscoveryAt: u.lastDiscoveryAt,
         ocrDone,
         ocrPending,
@@ -284,6 +288,14 @@ export async function POST(request: NextRequest) {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) {
     return NextResponse.json({ error: "User tidak ditemukan" }, { status: 404 });
+  }
+
+  const creds = await getUserBappenasCreds(userId);
+  if (!creds) {
+    return NextResponse.json(
+      { error: "User tidak punya kredensial Bappenas yang valid" },
+      { status: 400 }
+    );
   }
 
   const active = await prisma.scanJob.findFirst({

@@ -1,4 +1,5 @@
 import { prisma } from "./db.js";
+import { parseWebDavDate } from "./webdav-dates.js";
 import { connection } from "./scan-queues.js";
 import {
   createWebDavClient,
@@ -90,7 +91,7 @@ async function upsertFolderSnapshot(
   dirEtag: string | null
 ): Promise<void> {
   const norm = normalizePath(folderPath);
-  const lastMod = dirLastModified ? new Date(dirLastModified) : null;
+  const lastMod = parseWebDavDate(dirLastModified);
   await prisma.cloudFolderSnapshot.upsert({
     where: { userId_folderPath: { userId, folderPath: norm } },
     create: {

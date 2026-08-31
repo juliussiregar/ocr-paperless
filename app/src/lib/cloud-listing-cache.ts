@@ -5,6 +5,7 @@ import {
   type CloudEntry,
   type DirectoryListing,
 } from "@/lib/webdav";
+import { parseWebDavDate } from "@/lib/webdav-dates";
 
 export type CachedDirectoryListing = {
   entries: CloudEntry[];
@@ -136,7 +137,7 @@ async function upsertFolderSnapshot(
   dirEtag: string | null
 ): Promise<void> {
   const norm = normalizeListingPath(folderPath);
-  const lastMod = dirLastModified ? new Date(dirLastModified) : null;
+  const lastMod = parseWebDavDate(dirLastModified);
   await prisma.cloudFolderSnapshot.upsert({
     where: { userId_folderPath: { userId, folderPath: norm } },
     create: {

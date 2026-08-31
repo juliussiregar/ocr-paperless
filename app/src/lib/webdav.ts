@@ -7,6 +7,7 @@ import {
   isPdfFileName,
   type FileCategory,
 } from "@/lib/file-types";
+import { parseWebDavDateIso } from "@/lib/webdav-dates";
 
 export type CloudEntryType = "directory" | "file";
 
@@ -65,9 +66,7 @@ export function createUserWebDav(
     );
     if (dirSelf) {
       dirEtag = normalizeEtag(dirSelf.etag);
-      dirLastModified = dirSelf.lastmod
-        ? new Date(dirSelf.lastmod).toISOString()
-        : null;
+      dirLastModified = parseWebDavDateIso(dirSelf.lastmod);
     }
 
     const entries: CloudEntry[] = [];
@@ -83,7 +82,7 @@ export function createUserWebDav(
         path: item.filename,
         name: item.basename,
         size: typeof item.size === "number" ? item.size : null,
-        lastModified: item.lastmod ? new Date(item.lastmod).toISOString() : null,
+        lastModified: parseWebDavDateIso(item.lastmod),
         mimeType: mime,
         isIngestible: ingestible,
         isPdf: item.type === "file" && isPdfFileName(item.basename, mime),
