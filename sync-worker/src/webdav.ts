@@ -6,6 +6,7 @@ import { Readable } from "stream";
 import { createClient, type FileStat } from "webdav";
 import { isIngestibleFileName, isPdfFileName, fileCategoryFromName } from "./file-types.js";
 import { parseWebDavDate, parseWebDavDateIso } from "./webdav-dates.js";
+import { withWebDavSlot } from "./webdav-budget.js";
 
 export type CloudEntry = {
   type: "directory" | "file";
@@ -66,9 +67,9 @@ function normalizeEtag(etag: unknown): string | null {
 }
 
 function discoveryConcurrency(): number {
-  const n = Number(process.env.WEBDAV_DISCOVERY_CONCURRENCY ?? "16");
-  if (!Number.isFinite(n)) return 16;
-  return Math.min(32, Math.max(1, Math.floor(n)));
+  const n = Number(process.env.WEBDAV_DISCOVERY_CONCURRENCY ?? "24");
+  if (!Number.isFinite(n) || n < 1) return 24;
+  return Math.min(32, Math.floor(n));
 }
 
 function extractFileId(item: FileStat): string | null {
@@ -145,6 +146,8 @@ async function walkDocumentTree(options: {
     dirLastModified: Date | null,
     dirEtag: string | null
   ) => void | Promise<void>;
+  /** Called for each ingestible file as directories are listed (enables overlap ingest). */
+  onFileFound?: (file: RemoteFile) => void | Promise<void>;
 }): Promise<{
   files: RemoteFile[];
   skippedDirs: string[];
@@ -254,9 +257,11 @@ async function walkDocumentTree(options: {
 
     let items: FileStat | FileStat[];
     try {
-      const raw = await options.client.getDirectoryContents(dir, {
-        details: true,
-      });
+      const raw = await withWebDavSlot(() =>
+        options.client.getDirectoryContents(dir, {
+          details: true,
+        })
+      );
       items = Array.isArray(raw)
         ? raw
         : ((raw as { data?: FileStat[] }).data ?? []);
@@ -308,7 +313,11 @@ async function walkDocumentTree(options: {
         continue;
       }
       if (!isIngestibleFile(item)) continue;
-      results.push(toRemoteFile(item));
+      const remote = toRemoteFile(item);
+      results.push(remote);
+      if (options.onFileFound) {
+        await options.onFileFound(remote);
+      }
     }
 
     inFlight.delete(dir);
@@ -422,6 +431,7 @@ export function createWebDavClient(
       dirLastModified: Date | null,
       dirEtag: string | null
     ) => void | Promise<void>;
+    onFileFound?: (file: RemoteFile) => void | Promise<void>;
   }): Promise<{ files: RemoteFile[]; skippedDirs: string[] }> {
     const walked = await walkDocumentTree({
       client,
@@ -429,6 +439,7 @@ export function createWebDavClient(
       shouldAbort: options?.shouldAbort,
       shouldSkipDir: options?.shouldSkipDir,
       onDirListed: options?.onDirListed,
+      onFileFound: options?.onFileFound,
       onProgress: async (p) => {
         await options?.onProgress?.(p.found, {
           skippedDirs: p.skippedDirs,
@@ -507,6 +518,13 @@ export function createWebDavClient(
    * Also aborts after WEBDAV_DOWNLOAD_TIMEOUT_MS so empty/hung streams don't stall the scan.
    */
   async function downloadToTemp(
+    remotePath: string,
+    opts?: { signal?: AbortSignal }
+  ): Promise<{ tempPath: string; hash: string; size: number }> {
+    return withWebDavSlot(() => downloadToTempInner(remotePath, opts));
+  }
+
+  async function downloadToTempInner(
     remotePath: string,
     opts?: { signal?: AbortSignal }
   ): Promise<{ tempPath: string; hash: string; size: number }> {

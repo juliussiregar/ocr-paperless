@@ -46,6 +46,9 @@ model User {
   encryptedBappenasPassword  String    @map("encrypted_bappenas_password")
   lastSyncAt                 DateTime? @map("last_sync_at")
   lastDiscoveryAt            DateTime? @map("last_discovery_at")
+  lastScanCloudFiles         Int       @default(0) @map("last_scan_cloud_files")
+  lastScanNeedsIngest        Int       @default(0) @map("last_scan_needs_ingest")
+  lastScanUnchanged          Int       @default(0) @map("last_scan_unchanged")
   createdAt                  DateTime  @default(now()) @map("created_at")
   updatedAt                  DateTime  @updatedAt @map("updated_at")
 

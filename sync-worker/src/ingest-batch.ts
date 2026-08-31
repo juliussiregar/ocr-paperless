@@ -26,6 +26,7 @@ import {
   emptyFileSkippedPatch,
   isEmptyDownload,
 } from "./empty-file.js";
+import { claimSyncFileForIngest } from "./ingest-claim.js";
 
 async function withRetries<T>(
   fn: () => Promise<T>,
@@ -216,6 +217,17 @@ export async function runIngestPathsForJob(
         }
       }
 
+      const claim = await claimSyncFileForIngest(userId, remotePath, {
+        fileId: remoteMeta?.fileId,
+      });
+      if (!claim.ok) {
+        console.log(`[ingest ${jobId}] skip ${remotePath}: ${claim.reason}`);
+        skipped++;
+        processed++;
+        await bumpJobProgress();
+        return;
+      }
+
       await prisma.scanJob.updateMany({
         where: {
           id: jobId,
@@ -289,10 +301,11 @@ export async function runIngestPathsForJob(
 
       const duplicateByHash = await prisma.syncFile.findFirst({
         where: {
+          userId,
           contentHash: hash,
           syncStatus: { in: [SyncStatus.OCR_DONE, SyncStatus.SKIPPED] },
           paperlessDocumentId: { not: null },
-          NOT: { userId, remotePath },
+          NOT: { remotePath },
         },
       });
 
@@ -311,6 +324,7 @@ export async function runIngestPathsForJob(
             syncStatus: SyncStatus.SKIPPED,
             paperlessDocumentId: duplicateByHash.paperlessDocumentId,
             lastSyncedAt: new Date(),
+            errorMessage: `Duplikat konten (sama dengan ${duplicateByHash.remotePath})`,
           },
         });
         skipped++;
@@ -335,6 +349,7 @@ export async function runIngestPathsForJob(
             syncStatus: SyncStatus.OCR_DONE,
             paperlessDocumentId: existingPaperlessId,
             lastSyncedAt: new Date(),
+            errorMessage: null,
           },
         });
         skipped++;

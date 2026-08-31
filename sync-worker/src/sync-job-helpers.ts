@@ -13,9 +13,9 @@ export function ingestCap(explicit?: number | null): number {
 }
 
 export function downloadConcurrency(): number {
-  const n = Number(process.env.WEBDAV_DOWNLOAD_CONCURRENCY ?? "4");
-  if (!Number.isFinite(n)) return 4;
-  return Math.min(10, Math.max(1, Math.floor(n)));
+  const n = Number(process.env.WEBDAV_DOWNLOAD_CONCURRENCY ?? "14");
+  if (!Number.isFinite(n)) return 14;
+  return Math.min(20, Math.max(1, Math.floor(n)));
 }
 
 export async function isCancelled(jobId: string): Promise<boolean> {

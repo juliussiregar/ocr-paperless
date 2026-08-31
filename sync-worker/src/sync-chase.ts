@@ -46,6 +46,7 @@ export async function maybeChainNextDeltaSync(
       selectedPaths: JSON.stringify({
         rootPath: SYNC_ROOT_PATH,
         limit,
+        preferQueue: true,
       }),
     },
   });

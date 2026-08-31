@@ -1,4 +1,4 @@
-import { ScanJobStatus } from "@prisma/client";
+import { ScanJobStatus, SyncStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import {
   discoverQueue,
@@ -186,7 +186,13 @@ async function listUsersWithBappenasCreds(): Promise<
 }
 
 export async function triggerDeltaSyncForAllUsers(): Promise<{
-  enqueued: Array<{ userId: string; email: string; jobId: string }>;
+  enqueued: Array<{
+    userId: string;
+    email: string;
+    jobId: string;
+    mode: "queue" | "walk";
+    pending: number;
+  }>;
   skippedActive: Array<{ userId: string; email: string; jobId: string }>;
   limit: number;
 }> {
@@ -198,7 +204,13 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
     throw new Error("Tidak ada user dengan kredensial Bappenas");
   }
 
-  const enqueued: Array<{ userId: string; email: string; jobId: string }> = [];
+  const enqueued: Array<{
+    userId: string;
+    email: string;
+    jobId: string;
+    mode: "queue" | "walk";
+    pending: number;
+  }> = [];
   const skippedActive: Array<{ userId: string; email: string; jobId: string }> =
     [];
 
@@ -225,17 +237,63 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
       continue;
     }
 
+    const pending = await prisma.syncFile.count({
+      where: {
+        userId: user.id,
+        syncStatus: {
+          in: [
+            SyncStatus.DISCOVERED,
+            SyncStatus.QUEUED,
+            SyncStatus.DOWNLOADING,
+          ],
+        },
+      },
+    });
+
+    // Seed progress denominator so UI continues from pre-deploy queue.
+    if (pending > 0) {
+      const userRow = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { lastScanNeedsIngest: true, lastScanCloudFiles: true },
+      });
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          lastScanNeedsIngest: Math.max(
+            userRow?.lastScanNeedsIngest ?? 0,
+            pending
+          ),
+          lastScanCloudFiles: Math.max(
+            userRow?.lastScanCloudFiles ?? 0,
+            pending
+          ),
+          lastDiscoveryAt: new Date(),
+        },
+      });
+    }
+
+    const preferQueue = pending > 0;
     const job = await prisma.scanJob.create({
       data: {
         status: ScanJobStatus.PENDING,
         triggeredById: user.id,
         jobType: "delta_sync",
-        selectedPaths: JSON.stringify({ rootPath, limit }),
+        selectedPaths: JSON.stringify(
+          preferQueue
+            ? { rootPath, limit, preferQueue: true }
+            : { rootPath, limit, forceWalk: true }
+        ),
       },
     });
 
     await enqueueScanJob(job.id);
-    enqueued.push({ userId: user.id, email: user.email, jobId: job.id });
+    enqueued.push({
+      userId: user.id,
+      email: user.email,
+      jobId: job.id,
+      mode: preferQueue ? "queue" : "walk",
+      pending,
+    });
   }
 
   return { enqueued, skippedActive, limit };
@@ -243,20 +301,40 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
 
 export async function restartSyncPipeline(): Promise<void> {
   console.log("[sync-restart] pause: cancel jobs + matikan auto scan");
+
+  // Keep in-flight downloads as DISCOVERED so deploy/restart does not re-walk.
+  const preserved = await prisma.syncFile.updateMany({
+    where: {
+      syncStatus: { in: [SyncStatus.QUEUED, SyncStatus.DOWNLOADING] },
+    },
+    data: {
+      syncStatus: SyncStatus.DISCOVERED,
+      errorMessage: null,
+      ocrPendingAt: null,
+    },
+  });
+  console.log(
+    `[sync-restart] preserve ${preserved.count} queued/downloading → DISCOVERED`
+  );
+
   const cancel = await cancelAllSyncJobs();
   await setAutoScanEnabled(false);
   console.log(
     `[sync-restart] cancelled ${cancel.cancelledJobIds.length} jobs, abandoned ${cancel.abandonedFiles} files, locks ${cancel.locksReleased}`
   );
 
-  console.log("[sync-restart] start: aktifkan auto sync + delta semua user");
+  console.log(
+    "[sync-restart] start: auto sync ON + lanjut antrian (atau walk jika kosong)"
+  );
   await setAutoScanEnabled(true);
   const trigger = await triggerDeltaSyncForAllUsers();
   console.log(
     `[sync-restart] batch limit=${trigger.limit}, enqueued=${trigger.enqueued.length}, skipped=${trigger.skippedActive.length}`
   );
   for (const row of trigger.enqueued) {
-    console.log(`  + ${row.email} job ${row.jobId}`);
+    console.log(
+      `  + ${row.email} job ${row.jobId} mode=${row.mode} pending=${row.pending}`
+    );
   }
   for (const row of trigger.skippedActive) {
     console.log(`  skip ${row.email} (active ${row.jobId})`);

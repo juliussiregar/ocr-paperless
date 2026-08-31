@@ -54,6 +54,7 @@ export async function triggerDeltaSyncForAllUsers(
           rootPath,
           limit,
           reconcileOnly,
+          forceWalk: !reconcileOnly,
         }),
       },
     });

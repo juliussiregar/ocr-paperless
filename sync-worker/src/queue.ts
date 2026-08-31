@@ -108,6 +108,7 @@ export async function maybeAutoScan(): Promise<void> {
           selectedPaths: JSON.stringify({
             rootPath,
             limit: batch,
+            forceWalk: true,
           }),
         },
       });

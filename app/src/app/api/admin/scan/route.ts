@@ -321,6 +321,7 @@ export async function POST(request: NextRequest) {
         rootPath,
         limit: reconcileOnly ? 0 : limit,
         reconcileOnly,
+        forceWalk: !reconcileOnly,
       }),
     },
   });

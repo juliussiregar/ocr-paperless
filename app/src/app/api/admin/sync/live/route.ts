@@ -22,6 +22,7 @@ const ACTIVE_STATUSES: ScanJobStatus[] = [
 function phaseLabel(phase: string | null, jobType: string, status: string): string {
   if (status === "PENDING") return "Antri di worker";
   if (phase === "discovering") return "Scan folder cloud";
+  if (phase === "queue") return "Antrian unduh";
   if (phase === "starting") return "Memulai";
   if (phase === "downloading" || jobType === "ingest_paths")
     return "Unduh + kirim OCR";
@@ -31,6 +32,11 @@ function phaseLabel(phase: string | null, jobType: string, status: string): stri
   if (jobType === "reconcile_only") return "Cek status OCR";
   if (jobType === "delta_sync") return "Sync cloud";
   return phase ?? status;
+}
+
+function pct(current: number, total: number): number | null {
+  if (!Number.isFinite(total) || total <= 0) return null;
+  return Math.min(100, Math.round((current / total) * 100));
 }
 
 export async function GET() {
@@ -90,21 +96,34 @@ export async function GET() {
   const usersWithCreds = credsUsers.map((u) => u.id);
   const userMeta = await prisma.user.findMany({
     where: { id: { in: usersWithCreds } },
-    select: { id: true, lastDiscoveryAt: true },
+    select: {
+      id: true,
+      lastDiscoveryAt: true,
+      lastScanCloudFiles: true,
+      lastScanNeedsIngest: true,
+      lastScanUnchanged: true,
+    },
   });
   const lastDiscoveryMap = new Map(
-    userMeta.map((row) => [row.id, row.lastDiscoveryAt])
+    userMeta.map((row) => [row.id, row])
   );
   const perUser = await Promise.all(
     credsUsers.map(async (u) => {
+      const meta = lastDiscoveryMap.get(u.id);
+      const since = meta?.lastDiscoveryAt ?? null;
       const [
         ocrDone,
         ocrPending,
         downloading,
+        discovered,
+        queued,
         failed,
         warnings,
         failedRetryable,
         failedExhausted,
+        ocrDoneSinceScan,
+        duplicatesSinceScan,
+        skippedSinceScan,
         activeJob,
       ] = await Promise.all([
           prisma.syncFile.count({
@@ -113,17 +132,25 @@ export async function GET() {
           prisma.syncFile.count({
             where: {
               userId: u.id,
-              syncStatus: {
-                in: [SyncStatus.OCR_PENDING, SyncStatus.QUEUED],
-              },
+              syncStatus: SyncStatus.OCR_PENDING,
             },
           }),
           prisma.syncFile.count({
             where: {
               userId: u.id,
-              syncStatus: {
-                in: [SyncStatus.DOWNLOADING, SyncStatus.DISCOVERED],
-              },
+              syncStatus: SyncStatus.DOWNLOADING,
+            },
+          }),
+          prisma.syncFile.count({
+            where: {
+              userId: u.id,
+              syncStatus: SyncStatus.DISCOVERED,
+            },
+          }),
+          prisma.syncFile.count({
+            where: {
+              userId: u.id,
+              syncStatus: SyncStatus.QUEUED,
             },
           }),
           prisma.syncFile.count({
@@ -152,6 +179,34 @@ export async function GET() {
               NOT: { OR: legacyEmptyFileOrConditions() },
             },
           }),
+          since
+            ? prisma.syncFile.count({
+                where: {
+                  userId: u.id,
+                  syncStatus: SyncStatus.OCR_DONE,
+                  lastSyncedAt: { gte: since },
+                },
+              })
+            : Promise.resolve(0),
+          since
+            ? prisma.syncFile.count({
+                where: {
+                  userId: u.id,
+                  syncStatus: SyncStatus.SKIPPED,
+                  lastSyncedAt: { gte: since },
+                  errorMessage: { contains: "Duplikat konten" },
+                },
+              })
+            : Promise.resolve(0),
+          since
+            ? prisma.syncFile.count({
+                where: {
+                  userId: u.id,
+                  syncStatus: SyncStatus.SKIPPED,
+                  lastSyncedAt: { gte: since },
+                },
+              })
+            : Promise.resolve(0),
           prisma.scanJob.findFirst({
             where: {
               triggeredById: u.id,
@@ -173,18 +228,41 @@ export async function GET() {
             },
           }),
         ]);
+
+      const needsIngest = meta?.lastScanNeedsIngest ?? 0;
+      const cloudFound = meta?.lastScanCloudFiles ?? 0;
+      const unchanged = meta?.lastScanUnchanged ?? 0;
+      const stillToDownload = discovered + queued + downloading;
+      const downloaded = Math.max(0, needsIngest - stillToDownload);
+      const scanned = ocrDoneSinceScan + duplicatesSinceScan;
+      const downloadPct = pct(downloaded, needsIngest);
+      const ocrPct = pct(scanned, needsIngest);
+
       return {
         userId: u.id,
         email: u.email,
-        lastDiscoveryAt:
-          lastDiscoveryMap.get(u.id)?.toISOString() ?? null,
+        lastDiscoveryAt: since?.toISOString() ?? null,
         ocrDone,
-        ocrPending,
-        downloading,
+        ocrPending: ocrPending + queued,
+        downloading: downloading + discovered,
         failed,
         warnings,
         failedRetryable,
         failedExhausted,
+        scan: {
+          cloudFound,
+          needsIngest,
+          unchanged,
+          stillToDownload,
+          downloaded,
+          ocrPending,
+          ocrDoneSinceScan,
+          duplicates: duplicatesSinceScan,
+          skippedOther: Math.max(0, skippedSinceScan - duplicatesSinceScan),
+          scanned,
+          downloadPct,
+          ocrPct,
+        },
         activeJob: activeJob
           ? {
               ...activeJob,
@@ -195,11 +273,9 @@ export async function GET() {
               ),
               startedAt: activeJob.startedAt?.toISOString() ?? null,
               progressPct:
-                activeJob.totalFiles > 0
-                  ? Math.round(
-                      (activeJob.processedFiles / activeJob.totalFiles) * 100
-                    )
-                  : null,
+                activeJob.jobType === "ingest_paths" && activeJob.totalFiles > 0
+                  ? pct(activeJob.processedFiles, activeJob.totalFiles)
+                  : downloadPct,
             }
           : null,
       };
@@ -240,6 +316,41 @@ export async function GET() {
       deleted: pipelineMap.DELETED ?? 0,
       embedPending,
     },
+    scanTotals: (() => {
+      const cloudFound = perUser.reduce((n, u) => n + (u.scan?.cloudFound ?? 0), 0);
+      const needsIngest = perUser.reduce(
+        (n, u) => n + (u.scan?.needsIngest ?? 0),
+        0
+      );
+      const downloaded = perUser.reduce(
+        (n, u) => n + (u.scan?.downloaded ?? 0),
+        0
+      );
+      const scanned = perUser.reduce((n, u) => n + (u.scan?.scanned ?? 0), 0);
+      const duplicates = perUser.reduce(
+        (n, u) => n + (u.scan?.duplicates ?? 0),
+        0
+      );
+      const unchanged = perUser.reduce(
+        (n, u) => n + (u.scan?.unchanged ?? 0),
+        0
+      );
+      const stillToDownload = perUser.reduce(
+        (n, u) => n + (u.scan?.stillToDownload ?? 0),
+        0
+      );
+      return {
+        cloudFound,
+        needsIngest,
+        unchanged,
+        stillToDownload,
+        downloaded,
+        scanned,
+        duplicates,
+        downloadPct: pct(downloaded, needsIngest),
+        ocrPct: pct(scanned, needsIngest),
+      };
+    })(),
     health,
     activeJobs: activeJobs.map((j) => ({
       id: j.id,

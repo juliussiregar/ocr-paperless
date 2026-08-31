@@ -17,15 +17,15 @@ let discoverWorker: Worker | null = null;
 let ingestWorker: Worker | null = null;
 
 function discoverConcurrency(): number {
-  const n = Number(process.env.SCAN_DISCOVER_CONCURRENCY ?? "4");
-  if (!Number.isFinite(n)) return 4;
-  return Math.min(12, Math.max(1, Math.floor(n)));
+  const n = Number(process.env.SCAN_DISCOVER_CONCURRENCY ?? "12");
+  if (!Number.isFinite(n)) return 12;
+  return Math.min(16, Math.max(1, Math.floor(n)));
 }
 
 function ingestConcurrency(): number {
-  const n = Number(process.env.SCAN_INGEST_CONCURRENCY ?? "4");
-  if (!Number.isFinite(n)) return 4;
-  return Math.min(16, Math.max(1, Math.floor(n)));
+  const n = Number(process.env.SCAN_INGEST_CONCURRENCY ?? "12");
+  if (!Number.isFinite(n)) return 12;
+  return Math.min(20, Math.max(1, Math.floor(n)));
 }
 
 export async function enqueueDiscoverJob(jobId: string): Promise<void> {
