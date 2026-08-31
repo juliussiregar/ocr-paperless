@@ -237,7 +237,7 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
       continue;
     }
 
-    const pending = await prisma.syncFile.count({
+    const pendingDownload = await prisma.syncFile.count({
       where: {
         userId: user.id,
         syncStatus: {
@@ -249,9 +249,17 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
         },
       },
     });
+    const ocrPending = await prisma.syncFile.count({
+      where: {
+        userId: user.id,
+        syncStatus: SyncStatus.OCR_PENDING,
+      },
+    });
+    const pending = pendingDownload;
 
-    // Seed progress denominator so UI continues from pre-deploy queue.
-    if (pending > 0) {
+    // Seed progress from leftover download queue + OCR backlog (no re-walk).
+    const needsHint = pendingDownload + ocrPending;
+    if (needsHint > 0) {
       const userRow = await prisma.user.findUnique({
         where: { id: user.id },
         select: { lastScanNeedsIngest: true, lastScanCloudFiles: true },
@@ -261,18 +269,18 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
         data: {
           lastScanNeedsIngest: Math.max(
             userRow?.lastScanNeedsIngest ?? 0,
-            pending
+            needsHint
           ),
           lastScanCloudFiles: Math.max(
             userRow?.lastScanCloudFiles ?? 0,
-            pending
+            needsHint
           ),
           lastDiscoveryAt: new Date(),
         },
       });
     }
 
-    const preferQueue = pending > 0;
+    const preferQueue = pendingDownload > 0;
     const job = await prisma.scanJob.create({
       data: {
         status: ScanJobStatus.PENDING,
@@ -292,7 +300,7 @@ export async function triggerDeltaSyncForAllUsers(): Promise<{
       email: user.email,
       jobId: job.id,
       mode: preferQueue ? "queue" : "walk",
-      pending,
+      pending: pendingDownload,
     });
   }
 
