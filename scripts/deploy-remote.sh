@@ -33,11 +33,22 @@ remote_deploy() {
   docker compose build sync-worker
   docker compose build app
 
-  echo "==> recreate app + sync-worker (+ paperless if polling changed)"
-  docker compose up -d postgres redis paperless
-  docker compose up -d --force-recreate sync-worker app
+  echo "==> recreate app (db push runs in entrypoint)"
+  docker compose up -d --force-recreate app
 
-  echo "==> health"
+  echo "==> wait for app health + schema sync"
+  for _ in $(seq 1 40); do
+    if curl -sf "http://127.0.0.1:${APP_PORT:-3002}/api/health" >/dev/null; then
+      echo "OK http://127.0.0.1:${APP_PORT:-3002}/api/health"
+      break
+    fi
+    sleep 3
+  done
+
+  echo "==> recreate sync-worker (after schema ready)"
+  docker compose up -d --force-recreate sync-worker
+
+  echo "==> final health"
   for _ in $(seq 1 40); do
     if curl -sf "http://127.0.0.1:${APP_PORT:-3002}/api/health" >/dev/null; then
       echo "OK http://127.0.0.1:${APP_PORT:-3002}/api/health"
