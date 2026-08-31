@@ -26,8 +26,24 @@ const MAX_CHUNKS_IN_CONTEXT = 12;
 const MAX_CHUNKS_DETAIL = 20;
 const MAX_CHUNK_CHARS = 1200;
 const MAX_DOCS_DETAIL = 3;
+const MAX_DOCS_ANALYZE = 2;
 
-type AskIntent = "list" | "detail" | "compare" | "default";
+function envInt(name: string, fallback: number, max: number): number {
+  const n = Number(process.env[name] ?? String(fallback));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(1, Math.floor(n)));
+}
+
+/** Max chars of full OCR text per doc in analyze mode (not a summary). */
+function fullDocMaxChars(): number {
+  return envInt("ASK_FULL_DOC_MAX_CHARS", 100000, 200000);
+}
+
+function analysisOverlapScanChars(): number {
+  return envInt("ASK_RANK_CONTENT_CHARS", 48000, 120000);
+}
+
+type AskIntent = "list" | "detail" | "compare" | "analyze" | "default";
 
 function getClient(): OpenAI | null {
   if (!apiKey?.startsWith("sk-")) return null;
@@ -59,7 +75,64 @@ type RankedChunk = {
   paperlessDocumentId: number;
   content: string;
   score: number;
+  chunkIndex: number;
 };
+
+/** Full OCR text (chunk-ordered) for deep analysis, not a summary. */
+async function buildFullDocumentBody(
+  doc: PaperlessDocument,
+  userId: string | undefined,
+  maxChars: number
+): Promise<string> {
+  const raw = (doc.content ?? "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  if (userId) {
+    try {
+      const { prisma } = await import("./prisma");
+      const rows = await prisma.documentChunk.findMany({
+        where: { userId, paperlessDocumentId: doc.id },
+        orderBy: { chunkIndex: "asc" },
+        select: { content: true },
+      });
+      if (rows.length > 0) {
+        const joined = rows.map((r) => r.content).join("\n\n");
+        if (joined.length >= raw.length * 0.85) {
+          if (joined.length <= maxChars) return joined;
+          return (
+            joined.slice(0, maxChars) +
+            "\n\n[Potong: teks OCR sangat panjang. Pin dokumen @ untuk fokus atau pecah pertanyaan per bagian.]"
+          );
+        }
+      }
+    } catch {
+      // fall through to Paperless content
+    }
+  }
+
+  if (raw.length <= maxChars) return raw;
+  return (
+    raw.slice(0, maxChars) +
+    "\n\n[Potong: teks OCR sangat panjang. Pin dokumen @ untuk fokus atau pecah pertanyaan per bagian.]"
+  );
+}
+
+async function buildAnalyzeContext(
+  docs: PaperlessDocument[],
+  userId: string | undefined
+): Promise<{ context: string; contextDocs: PaperlessDocument[] }> {
+  const maxChars = fullDocMaxChars();
+  const take = docs.slice(0, MAX_DOCS_ANALYZE);
+  const parts: string[] = [];
+  for (let i = 0; i < take.length; i++) {
+    const doc = take[i]!;
+    const body = await buildFullDocumentBody(doc, userId, maxChars);
+    parts.push(
+      `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nTeks OCR (utuh, berurutan):\n${body || "(kosong)"}`
+    );
+  }
+  return { context: parts.join("\n\n---\n\n"), contextDocs: take };
+}
 
 /**
  * Hybrid: rank stored chunks by cosine vs question among candidate docs.
@@ -78,6 +151,16 @@ async function buildContext(
 }> {
   if (docs.length === 0) {
     return { context: "", contextDocs: [], embeddingHits: 0, embeddingTokens: 0 };
+  }
+
+  if (intent === "analyze") {
+    const { context, contextDocs } = await buildAnalyzeContext(docs, userId);
+    return {
+      context,
+      contextDocs,
+      embeddingHits: 0,
+      embeddingTokens: 0,
+    };
   }
 
   const isList = intent === "list" || wantsDocList(question);
@@ -132,7 +215,7 @@ async function buildContext(
         embedding: true,
         chunkIndex: true,
       },
-      take: 1200,
+      take: 3000,
     });
 
     const docsWithChunks = new Set(rows.map((r) => r.paperlessDocumentId));
@@ -148,10 +231,33 @@ async function buildContext(
     const byDocSnippets = new Map<number, string[]>();
     const chunkOrder: number[] = [];
     const docBestScore = new Map<number, number>();
+    const pickedChunkKeys = new Set<string>();
+
+    const pickChunk = (
+      paperlessDocumentId: number,
+      content: string,
+      chunkIndex: number
+    ) => {
+      const key = `${paperlessDocumentId}:${chunkIndex}`;
+      if (pickedChunkKeys.has(key)) return;
+      if (!byDocSnippets.has(paperlessDocumentId)) {
+        byDocSnippets.set(paperlessDocumentId, []);
+        chunkOrder.push(paperlessDocumentId);
+      }
+      const bag = byDocSnippets.get(paperlessDocumentId)!;
+      if (bag.length >= chunksPerDoc) return;
+      pickedChunkKeys.add(key);
+      bag.push(content.slice(0, MAX_CHUNK_CHARS));
+    };
 
     if (queryVec && rows.length > 0) {
       const ranked: RankedChunk[] = [];
+      const rowByDocIdx = new Map<string, { content: string; chunkIndex: number }>();
       for (const row of rows) {
+        rowByDocIdx.set(
+          `${row.paperlessDocumentId}:${row.chunkIndex}`,
+          { content: row.content, chunkIndex: row.chunkIndex }
+        );
         const emb = row.embedding;
         if (!Array.isArray(emb) || emb.length === 0) continue;
         const score = cosineSimilarity(queryVec, emb as number[]);
@@ -159,19 +265,26 @@ async function buildContext(
           paperlessDocumentId: row.paperlessDocumentId,
           content: row.content,
           score,
+          chunkIndex: row.chunkIndex,
         });
         const prev = docBestScore.get(row.paperlessDocumentId) ?? -1;
         if (score > prev) docBestScore.set(row.paperlessDocumentId, score);
       }
       ranked.sort((a, b) => b.score - a.score);
       for (const c of ranked.slice(0, maxChunks)) {
-        if (!byDocSnippets.has(c.paperlessDocumentId)) {
-          byDocSnippets.set(c.paperlessDocumentId, []);
-          chunkOrder.push(c.paperlessDocumentId);
+        pickChunk(c.paperlessDocumentId, c.content, c.chunkIndex);
+        for (const neighbor of [-1, 1]) {
+          const adj = rowByDocIdx.get(
+            `${c.paperlessDocumentId}:${c.chunkIndex + neighbor}`
+          );
+          if (adj) {
+            pickChunk(
+              c.paperlessDocumentId,
+              adj.content,
+              c.chunkIndex + neighbor
+            );
+          }
         }
-        const bag = byDocSnippets.get(c.paperlessDocumentId)!;
-        if (bag.length >= chunksPerDoc) continue;
-        bag.push(c.content.slice(0, MAX_CHUNK_CHARS));
       }
       // Prefer docs with stronger chunk hits first
       chunkOrder.sort(
@@ -278,6 +391,7 @@ Jika informasi tidak ada di konteks, katakan dengan jujur bahwa tidak ditemukan.
 Mode jawaban:
 - Pencarian/daftar ("cari", "lihat dokumen tentang", "apa saja", "sebutkan"): cantumkan SEMUA dokumen di konteks. Jangan dipotong jadi 3 kalau konteks berisi 8.
 - Detail ("jelaskan", "uraikan", "apa isinya", "poin penting", "keputusan", "analisis"): gali dalam dokumen paling relevan; kutip fakta konkret (tanggal, pihak, nomor surat, agenda, keputusan) bila ada di konteks.
+- Analisis ("dampak", "implikasi", "hubungan", pertanyaan tersirat): baca konteks sebagai teks OCR utuh/cuplikan berurutan, inferensi hanya dari bukti di teks; sebut jika jawaban tidak eksplisit di dokumen.
 - Perbandingan: hanya dokumen yang diminta; persamaan, perbedaan, kesimpulan.
 - Jangan mengarang. Saat menyebut sumber, pakai field "Nama" (bukan nama file mentah / angka panjang).
 
@@ -302,6 +416,27 @@ Aturan format:
 Jawab Bahasa Indonesia, jelas. Markdown: list, **tebal**, *miring*. Tanpa HTML/heading #.
 Pakai riwayat chat untuk pertanyaan lanjutan.`;
 
+function looksImplicitAnalytical(question: string): boolean {
+  if (wantsDocList(question)) return false;
+  const q = question.toLowerCase();
+  if (
+    /\b(dampak|implikasi|hubungan|kaitan|terkait|risiko|evaluasi|rekomendasi|masalah|solusi|konteks|latar|signifikansi|peran|fungsi|tujuan|maksud|arti|makna|kesimpulan|temuan|argumen|justifikasi|alasan|bukti|evidence)\b/i.test(
+      q
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(seberapa|berapa besar|berapa banyak|mengapa|kenapa|bagaimana (jika|kalau|bila|supaya|agar))\b/i.test(
+      q
+    )
+  ) {
+    return true;
+  }
+  const tokens = queryTokens(question);
+  return tokens.length >= 4 && /\?/.test(q);
+}
+
 function detectIntent(question: string, hasFocus: boolean): AskIntent {
   if (
     /\b(bandingkan|perbandingan|bedakan|persamaan|perbedaan)\b/i.test(question) ||
@@ -310,6 +445,14 @@ function detectIntent(question: string, hasFocus: boolean): AskIntent {
     return "compare";
   }
   if (wantsDocList(question)) return "list";
+  if (
+    hasFocus &&
+    (looksImplicitAnalytical(question) ||
+      /\b(analisis|evaluasi|dampak|implikasi)\b/i.test(question))
+  ) {
+    return "analyze";
+  }
+  if (looksImplicitAnalytical(question)) return "analyze";
   if (
     hasFocus ||
     /\b(detail|jelaskan|uraikan|analisis|poin penting|keputusan|kesimpulan|apa isi|isinya|bagaimana|mengapa|kenapa|ringkas isi|rinci|mendalam)\b/i.test(
@@ -444,7 +587,8 @@ function bestContentWindow(content: string, question: string, maxChars: number):
 }
 
 function contentOverlapScore(question: string, d: PaperlessDocument): number {
-  const body = (d.content ?? "").toLowerCase().slice(0, 12000);
+  const scanLen = analysisOverlapScanChars();
+  const body = (d.content ?? "").toLowerCase().slice(0, scanLen);
   if (!body) return 0;
   const tokens = queryTokens(question).slice(0, 10);
   if (tokens.length === 0) return 0;
@@ -720,11 +864,13 @@ async function resolveDocs(
       });
 
   const takeN =
-    intent === "list" || wantsDocList(question)
-      ? MAX_CONTEXT_DOCS
-      : intent === "detail" || intent === "compare"
-        ? Math.min(MAX_DOCS_DETAIL + 1, limit)
-        : Math.min(limit, MAX_CANDIDATE_DOCS);
+    intent === "analyze"
+      ? MAX_DOCS_ANALYZE
+      : intent === "list" || wantsDocList(question)
+        ? MAX_CONTEXT_DOCS
+        : intent === "detail" || intent === "compare"
+          ? Math.min(MAX_DOCS_DETAIL + 1, limit)
+          : Math.min(limit, MAX_CANDIDATE_DOCS);
 
   return {
     docs: ranked.slice(0, takeN),
@@ -746,6 +892,8 @@ function buildMessages(
   let modeHint = "";
   if (intent === "list" || wantsDocList(question)) {
     modeHint = `\n\nInstruksi tambahan: mode DAFTAR. Konteks berisi ${contextDocCount} dokumen. Cantumkan SEMUA ${contextDocCount} dokumen (masing-masing ada Ringkas 2–4 kalimat berfakta). Jangan hanya 3.`;
+  } else if (intent === "analyze") {
+    modeHint = `\n\nInstruksi tambahan: mode ANALISIS. Konteks berisi teks OCR utuh/berurutan (bukan ringkasan). Jawab pertanyaan tersirat hanya dari bukti di teks; jika inferensi, tandai sebagai interpretasi. Kutip fakta konkret. Jika jawaban tidak ada di teks, katakan jujur.`;
   } else if (intent === "detail") {
     modeHint = `\n\nInstruksi tambahan: mode DETAIL. Gali dokumen paling relevan. Kutip fakta konkret dari cuplikan (tanggal, nomor, pihak, agenda, keputusan) bila ada. Jawab berstruktur poin, bukan daftar panjang.`;
   } else if (intent === "compare") {
@@ -795,7 +943,14 @@ export async function askDocuments(
   const { context, contextDocs, embeddingHits, embeddingTokens } =
     await buildContext(docs, question, userId, intent);
   const listMode = intent === "list" || wantsDocList(question);
-  const maxTokens = listMode ? 2200 : intent === "detail" ? 1800 : 1400;
+  const maxTokens =
+    intent === "analyze"
+      ? 3200
+      : listMode
+        ? 2200
+        : intent === "detail"
+          ? 2000
+          : 1600;
 
   const completion = await client.chat.completions.create({
     model,
@@ -885,7 +1040,13 @@ export async function askDocumentsStream(
       intent
     ),
     temperature: 0.2,
-    max_tokens: listMode ? 2400 : intent === "detail" ? 2000 : 1600,
+    max_tokens: listMode
+      ? 2400
+      : intent === "analyze"
+        ? 3200
+        : intent === "detail"
+          ? 2000
+          : 1600,
     stream: true,
     stream_options: { include_usage: true },
   });

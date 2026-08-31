@@ -20,6 +20,6 @@ export async function abandonInFlightSyncFiles(
 }
 
 export function scanMaxFilesFromEnv(): number {
-  const n = Number(process.env.SCAN_MAX_FILES ?? "50");
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 50;
+  const n = Number(process.env.SCAN_MAX_FILES ?? "100");
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 100;
 }

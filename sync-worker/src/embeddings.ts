@@ -2,10 +2,20 @@ import { createHash } from "crypto";
 import { prisma } from "./db.js";
 import { getPaperlessDocumentContent } from "./paperless.js";
 
-const CHUNK_SIZE = 1000;
-const CHUNK_OVERLAP = 150;
+const CHUNK_SIZE = envChunkSize();
+const CHUNK_OVERLAP = envChunkOverlap();
 const EMBED_BATCH = 32;
-const BACKFILL_BATCH = Number(process.env.EMBED_BACKFILL_BATCH ?? "5") || 5;
+const BACKFILL_BATCH = Number(process.env.EMBED_BACKFILL_BATCH ?? "15") || 15;
+
+function envChunkSize(): number {
+  const n = Number(process.env.ASK_CHUNK_SIZE ?? "1500");
+  return Number.isFinite(n) && n >= 500 ? Math.min(4000, Math.floor(n)) : 1500;
+}
+
+function envChunkOverlap(): number {
+  const n = Number(process.env.ASK_CHUNK_OVERLAP ?? "200");
+  return Number.isFinite(n) && n >= 0 ? Math.min(800, Math.floor(n)) : 200;
+}
 
 export function chunkText(
   text: string,

@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getUserBappenasCreds } from "@/lib/bappenas";
-import { createUserWebDav } from "@/lib/webdav";
 import { rateLimit } from "@/lib/rate-limit";
 import {
   emptyCloudFolderHint,
   summarizeCloudFolder,
 } from "@/lib/cloud-folder-hint";
+import {
+  fetchDirectoryListing,
+  getCachedListing,
+} from "@/lib/cloud-listing-cache";
 
 /** Immediate cloud listing stats for one folder (lazy, on hover). */
 export async function GET(request: NextRequest) {
@@ -49,10 +52,26 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const client = createUserWebDav(creds.url, creds.username, creds.password);
-    const children = await client.listDirectory(path);
+    const cached = await getCachedListing(session.user.id, path);
+    let children;
+    let listingCached = false;
+
+    if (cached) {
+      children = cached.entries;
+      listingCached = true;
+    } else {
+      const listing = await fetchDirectoryListing(
+        session.user.id,
+        path,
+        creds,
+        { refresh: false }
+      );
+      children = listing.entries;
+      listingCached = listing.listingCached;
+    }
+
     const hint = summarizeCloudFolder(children);
-    return NextResponse.json({ path, hint });
+    return NextResponse.json({ path, hint, listingCached });
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Gagal membaca folder cloud";

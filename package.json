@@ -15,6 +15,7 @@
     "prod:down": "docker compose down",
     "prod:logs": "docker compose logs -f",
     "prod:ps": "docker compose ps",
+    "pre-deploy": "bash scripts/pre-deploy-check.sh",
     "db:push": "cd app && set -a && . ./.env.local && set +a && npx prisma db push --schema=../prisma/schema.prisma && NODE_PATH=./node_modules npx tsx --env-file=.env.local ../prisma/seed.ts",
     "db:generate": "prisma generate",
     "db:seed": "cd app && NODE_PATH=./node_modules npx tsx --env-file=.env.local ../prisma/seed.ts",

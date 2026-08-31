@@ -7,6 +7,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { getUserBappenasCreds } from "@/lib/bappenas";
 import { ScanJobStatus, SyncStatus } from "@prisma/client";
 import { scanMaxFilesFromEnv } from "@/lib/scan-cleanup";
+import { isIngestibleFileName } from "@/lib/file-types";
 import { activeScanJobWhere } from "@/lib/scan-status";
 
 /** Retry failed sync files (re-queue for ingest). */
@@ -62,7 +63,9 @@ export async function POST(request: NextRequest) {
     }
 
     paths = paths
-      .filter((p) => p.toLowerCase().endsWith(".pdf"))
+      .filter((p) =>
+        isIngestibleFileName(p.split("/").filter(Boolean).pop() ?? p, null)
+      )
       .slice(0, batchCap);
 
     if (paths.length === 0) {
@@ -100,6 +103,7 @@ export async function POST(request: NextRequest) {
         update: {
           syncStatus: SyncStatus.QUEUED,
           errorMessage: null,
+          ingestRetryCount: 0,
         },
       });
     }
@@ -108,14 +112,14 @@ export async function POST(request: NextRequest) {
       data: {
         triggeredBy: { connect: { id: userId } },
         status: ScanJobStatus.PENDING,
-        jobType: "ingest_selected",
-        selectedPaths: JSON.stringify({ mode: "paths", paths }),
+        jobType: "ingest_paths",
+        selectedPaths: JSON.stringify({ mode: "paths", paths, source: "manual_retry" }),
         totalFiles: paths.length,
       },
     });
 
     try {
-      await enqueueScanJob(job.id);
+      await enqueueScanJob(job.id, "ingest_paths");
     } catch (err) {
       await prisma.scanJob.update({
         where: { id: job.id },

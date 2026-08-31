@@ -96,6 +96,11 @@ echo
 
 if [[ "$ok" -eq 1 ]]; then
   info "App OK: http://127.0.0.1:${PORT}/api/health"
+  if command -v jq >/dev/null 2>&1; then
+    curl -sf "http://127.0.0.1:${PORT}/api/health" | jq '{status, checks, warnings}'
+  else
+    curl -sf "http://127.0.0.1:${PORT}/api/health" || true
+  fi
 else
   echo "WARN: health belum OK dalam ~3 menit. Cek: docker compose logs -f app"
 fi

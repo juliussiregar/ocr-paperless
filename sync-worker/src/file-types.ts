@@ -1,0 +1,82 @@
+export type FileCategory =
+  | "pdf"
+  | "word"
+  | "excel"
+  | "powerpoint"
+  | "image"
+  | "text"
+  | "other";
+
+const EXT_TO_CATEGORY: Record<string, FileCategory> = {
+  pdf: "pdf",
+  doc: "word",
+  docx: "word",
+  odt: "word",
+  rtf: "word",
+  xls: "excel",
+  xlsx: "excel",
+  ods: "excel",
+  csv: "excel",
+  ppt: "powerpoint",
+  pptx: "powerpoint",
+  odp: "powerpoint",
+  jpg: "image",
+  jpeg: "image",
+  png: "image",
+  gif: "image",
+  webp: "image",
+  tiff: "image",
+  tif: "image",
+  bmp: "image",
+  heic: "image",
+  heif: "image",
+  txt: "text",
+  md: "text",
+  html: "text",
+  htm: "text",
+};
+
+const MIME_PREFIX: Array<{ prefix: string; category: FileCategory }> = [
+  { prefix: "application/pdf", category: "pdf" },
+  { prefix: "image/", category: "image" },
+  { prefix: "text/", category: "text" },
+];
+
+const MIME_EXACT: Record<string, FileCategory> = {
+  "application/msword": "word",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+    "word",
+  "application/vnd.oasis.opendocument.text": "word",
+  "application/rtf": "word",
+  "application/vnd.ms-excel": "excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "excel",
+  "application/vnd.oasis.opendocument.spreadsheet": "excel",
+  "text/csv": "excel",
+  "application/vnd.ms-powerpoint": "powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+    "powerpoint",
+  "application/vnd.oasis.opendocument.presentation": "powerpoint",
+};
+
+function extensionFromName(name: string): string {
+  const base = name.trim().toLowerCase();
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  return base.slice(dot + 1);
+}
+
+export function isIngestibleFileName(
+  name: string,
+  mimeType?: string | null
+): boolean {
+  const ext = extensionFromName(name);
+  if (ext && EXT_TO_CATEGORY[ext]) return true;
+
+  const mime = (mimeType ?? "").trim().toLowerCase();
+  if (!mime) return false;
+  if (MIME_EXACT[mime]) return true;
+  for (const { prefix } of MIME_PREFIX) {
+    if (mime.startsWith(prefix)) return true;
+  }
+  return false;
+}

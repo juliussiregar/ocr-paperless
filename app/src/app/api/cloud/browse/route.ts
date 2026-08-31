@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getUserBappenasCreds, mapSyncStatusToUi } from "@/lib/bappenas";
-import { createUserWebDav } from "@/lib/webdav";
 import { rateLimit } from "@/lib/rate-limit";
-import { buildFolderStatsMap } from "@/lib/folder-stats";
+import { buildFolderStatsMap, nestedSyncFileFilter } from "@/lib/folder-stats";
+import { fetchDirectoryListing, getCachedListing } from "@/lib/cloud-listing-cache";
+import { summarizeCloudFolder } from "@/lib/cloud-folder-hint";
+import { folderDisplaySizeBytes } from "@/lib/folder-display-size";
 
 export async function GET(request: NextRequest) {
   const session = await auth();
@@ -22,6 +24,23 @@ export async function GET(request: NextRequest) {
 
   const pathParam = request.nextUrl.searchParams.get("path") ?? "/";
   const path = pathParam.startsWith("/") ? pathParam : `/${pathParam}`;
+  const refresh = request.nextUrl.searchParams.get("refresh") === "1";
+
+  if (refresh) {
+    const refreshRl = rateLimit(
+      `cloud-browse-refresh:${session.user.id}`,
+      20,
+      60_000
+    );
+    if (!refreshRl.ok) {
+      return NextResponse.json(
+        {
+          error: `Refresh terlalu sering. Coba lagi dalam ${refreshRl.retryAfterSec}s`,
+        },
+        { status: 429 }
+      );
+    }
+  }
 
   const creds = await getUserBappenasCreds(session.user.id);
   if (!creds) {
@@ -36,8 +55,13 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const client = createUserWebDav(creds.url, creds.username, creds.password);
-    const entries = await client.listDirectory(path);
+    const listing = await fetchDirectoryListing(
+      session.user.id,
+      path,
+      creds,
+      { refresh }
+    );
+    const entries = listing.entries;
 
     const filePaths = entries
       .filter((e) => e.type === "file")
@@ -48,7 +72,8 @@ export async function GET(request: NextRequest) {
       .map((e) => e.path);
 
     const parentNorm = path === "/" ? "/" : path.replace(/\/$/, "");
-    const browsePrefix = parentNorm === "/" ? "/" : `${parentNorm}/`;
+
+    const nestedFilter = nestedSyncFileFilter(session.user.id, dirPaths);
 
     const [syncRows, nestedSyncRows] = await Promise.all([
       filePaths.length > 0
@@ -66,12 +91,9 @@ export async function GET(request: NextRequest) {
             },
           })
         : Promise.resolve([]),
-      dirPaths.length > 0
+      nestedFilter
         ? prisma.syncFile.findMany({
-            where: {
-              userId: session.user.id,
-              remotePath: { startsWith: browsePrefix },
-            },
+            where: nestedFilter,
             select: {
               remotePath: true,
               syncStatus: true,
@@ -88,9 +110,27 @@ export async function GET(request: NextRequest) {
       nestedSyncRows
     );
 
+    const cachedHints = await Promise.all(
+      dirPaths.map(async (dirPath) => {
+        const cached = await getCachedListing(session.user.id, dirPath);
+        if (!cached) return null;
+        return {
+          path: dirPath,
+          hint: summarizeCloudFolder(cached.entries),
+        };
+      })
+    );
+    const hintByPath = new Map(
+      cachedHints
+        .filter((row): row is NonNullable<typeof row> => row != null)
+        .map((row) => [row.path, row.hint])
+    );
+
     const items = entries.map((e) => {
       if (e.type === "directory") {
         const folderStats = folderStatsMap.get(e.path) ?? null;
+        const cloudHint = hintByPath.get(e.path) ?? null;
+        const folderSizeBytes = folderDisplaySizeBytes(folderStats, cloudHint);
         return {
           ...e,
           ingestStatus: null as null,
@@ -100,7 +140,8 @@ export async function GET(request: NextRequest) {
           syncedFileSize: null as number | null,
           isZeroByte: false,
           folderStats,
-          cloudHint: null as null,
+          cloudHint,
+          folderSizeBytes,
           selectable: false,
         };
       }
@@ -109,7 +150,7 @@ export async function GET(request: NextRequest) {
       const syncStage = sync?.syncStatus ?? null;
       const ingestStatus = mapSyncStatusToUi(syncStage);
       const selectable =
-        e.isPdf &&
+        e.isIngestible &&
         (ingestStatus === "not_ingested" || ingestStatus === "failed");
       const syncedFileSize =
         sync?.fileSize != null ? Number(sync.fileSize) : null;
@@ -143,6 +184,9 @@ export async function GET(request: NextRequest) {
       path: path === "/" ? "/" : path.replace(/\/$/, ""),
       breadcrumbs,
       items,
+      listingCached: listing.listingCached,
+      listingStale: listing.listingStale,
+      listingCachedAt: listing.listingCachedAt,
     });
   } catch (err) {
     const message =

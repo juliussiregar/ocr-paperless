@@ -32,6 +32,8 @@ enum SyncStatus {
   OCR_DONE
   SKIPPED
   FAILED
+  /// File no longer present in cloud listing (moved away or deleted)
+  DELETED
 }
 
 enum ScanJobStatus {
@@ -63,8 +65,24 @@ model User {
   chats     ChatConversation[]
   favorites CloudFavorite[]
   chunks    DocumentChunk[]
+  folderSnapshots CloudFolderSnapshot[]
 
   @@map("users")
+}
+
+/// Cached folder mtime for skip unchanged subtrees (Phase 4)
+model CloudFolderSnapshot {
+  id              String    @id @default(cuid())
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folderPath      String    @map("folder_path")
+  dirLastModified DateTime? @map("dir_last_modified")
+  dirEtag         String?   @map("dir_etag")
+  lastListedAt    DateTime  @map("last_listed_at")
+
+  @@unique([userId, folderPath])
+  @@index([userId])
+  @@map("cloud_folder_snapshots")
 }
 
 model CloudFavorite {
@@ -97,20 +115,29 @@ model SyncFile {
   syncStatus          SyncStatus @default(DISCOVERED) @map("sync_status")
   paperlessDocumentId Int?       @map("paperless_document_id")
   errorMessage        String?    @map("error_message")
+  /// Auto-retry attempts after ingest failure (cap via INGEST_MAX_RETRY_COUNT)
+  ingestRetryCount    Int        @default(0) @map("ingest_retry_count")
   /// When file entered OCR_PENDING (for UI age / timeout messaging)
   ocrPendingAt        DateTime?  @map("ocr_pending_at")
   lastSyncedAt        DateTime?  @map("last_synced_at")
+  /// Last time file was seen in a cloud listing (delta reconcile)
+  lastSeenAt          DateTime?  @map("last_seen_at")
+  /// Previous path before move/rename reconcile
+  previousRemotePath  String?    @map("previous_remote_path")
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
 
   chunks DocumentChunk[]
 
   @@unique([userId, remotePath])
+  @@unique([userId, remoteFileId])
   @@index([userId])
+  @@index([userId, remotePath])
   @@index([contentHash])
   @@index([syncStatus])
   @@index([etag])
   @@index([paperlessDocumentId])
+  @@index([userId, contentHash])
   @@map("sync_files")
 }
 

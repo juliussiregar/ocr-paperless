@@ -27,6 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 import { humanizeFileName } from "@/lib/display-name";
 import { DocPreviewLink } from "@/components/DocPreviewLink";
+import { CloudSyncSummaryPanel } from "@/components/CloudSyncSummaryPanel";
 
 type SearchHit = {
   id: number;
@@ -38,17 +39,6 @@ type SearchHit = {
   pageCount: number;
   created: string;
   modified: string;
-};
-
-type RecentItem = {
-  id: string;
-  displayName: string;
-  fileName: string;
-  remotePath: string | null;
-  paperlessDocumentId: number;
-  lastSyncedAt: string | null;
-  updatedAt: string;
-  fileSize: number | null;
 };
 
 type SearchSummary = {
@@ -63,7 +53,6 @@ type SortKey = "relevance" | "newest" | "oldest" | "name";
 
 const HISTORY_KEY = "docsearch:search-history";
 const HISTORY_MAX = 8;
-const RECENT_PAGE_SIZE = 20;
 
 function loadHistory(): string[] {
   try {
@@ -183,21 +172,6 @@ function formatDateRange(
   return formatShortDate(oldest || newest);
 }
 
-/** Relative age for scan feed (Bahasa Indonesia, singkat). */
-function formatRelativeSync(iso: string | null | undefined): string {
-  if (!iso) return "-";
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return "-";
-  const mins = Math.max(0, Math.floor((Date.now() - t) / 60_000));
-  if (mins < 1) return "baru saja";
-  if (mins < 60) return `${mins} mnt lalu`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 48) return `${hrs} jam lalu`;
-  const days = Math.floor(hrs / 24);
-  if (days < 14) return `${days} hari lalu`;
-  return formatShortDate(iso);
-}
-
 export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -231,20 +205,10 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [mobilePreview, setMobilePreview] = useState(false);
 
-  const [recent, setRecent] = useState<RecentItem[]>([]);
-  const [recentPage, setRecentPage] = useState(0);
-  const [recentHasMore, setRecentHasMore] = useState(false);
-  const [recentLoading, setRecentLoading] = useState(false);
-  const [recentLoadingMore, setRecentLoadingMore] = useState(false);
-  const [recentTotal, setRecentTotal] = useState(0);
-  const [recentError, setRecentError] = useState<string | null>(null);
-
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const skipUrlWrite = useRef(false);
   const loadMoreLock = useRef(false);
-  const recentRef = useRef<RecentItem[]>([]);
-  recentRef.current = recent;
 
   const selected = useMemo(() => {
     const fromResults = results.find((r) => r.id === selectedId);
@@ -256,108 +220,8 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
           humanizeFileName(fromResults.title || fromResults.fileName),
       };
     }
-    const fromRecent = recent.find((r) => r.paperlessDocumentId === selectedId);
-    if (fromRecent) {
-      return {
-        id: fromRecent.paperlessDocumentId,
-        displayName: fromRecent.displayName || humanizeFileName(fromRecent.fileName),
-      };
-    }
     return null;
-  }, [results, recent, selectedId]);
-
-  const loadRecent = useCallback(async (pageNum: number, append: boolean) => {
-    if (loadMoreLock.current && append) return;
-    if (append) {
-      loadMoreLock.current = true;
-      setRecentLoadingMore(true);
-    } else {
-      setRecentLoading(true);
-      setRecentError(null);
-    }
-    try {
-      let pageCursor = pageNum;
-      let guard = 0;
-      let addedAny = false;
-      let lastHasMore = false;
-      let lastTotal = 0;
-
-      // Server pages SyncFile rows; client dedupes by paperlessDocumentId.
-      // Skip empty pages so Load more never looks stuck.
-      while (guard < 6) {
-        guard += 1;
-        const params = new URLSearchParams({
-          page: String(pageCursor),
-          limit: String(RECENT_PAGE_SIZE),
-        });
-        const res = await fetch(`/api/cloud/recent?${params}`);
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error(
-            typeof data.error === "string"
-              ? data.error
-              : "Gagal memuat scan terbaru"
-          );
-        }
-        const nextFiles = ((data.files ?? []) as RecentItem[]).filter(
-          (f) => typeof f.paperlessDocumentId === "number"
-        );
-        lastTotal = Number(data.total) || nextFiles.length;
-        lastHasMore = Boolean(data.hasMore);
-        setRecentTotal(lastTotal);
-        setRecentPage(data.page ?? pageCursor);
-
-        if (append) {
-          const seenSync = new Set(recentRef.current.map((r) => r.id));
-          const seenDoc = new Set(
-            recentRef.current.map((r) => r.paperlessDocumentId)
-          );
-          const extra = nextFiles.filter(
-            (f) => !seenSync.has(f.id) && !seenDoc.has(f.paperlessDocumentId)
-          );
-          if (extra.length > 0) {
-            const merged = [...recentRef.current, ...extra];
-            recentRef.current = merged;
-            setRecent(merged);
-            addedAny = true;
-            break;
-          }
-          if (!lastHasMore) break;
-          pageCursor += 1;
-          continue;
-        }
-
-        const seenDoc = new Set<number>();
-        const unique: RecentItem[] = [];
-        for (const f of nextFiles) {
-          if (seenDoc.has(f.paperlessDocumentId)) continue;
-          seenDoc.add(f.paperlessDocumentId);
-          unique.push(f);
-        }
-        setRecent(unique);
-        addedAny = unique.length > 0;
-        break;
-      }
-
-      setRecentHasMore(lastHasMore);
-      setRecentError(null);
-      if (append && !addedAny && !lastHasMore) {
-        setRecentHasMore(false);
-      }
-    } catch (err) {
-      if (!append) {
-        setRecent([]);
-        setRecentHasMore(false);
-      }
-      setRecentError(
-        err instanceof Error ? err.message : "Gagal memuat scan terbaru"
-      );
-    } finally {
-      setRecentLoading(false);
-      setRecentLoadingMore(false);
-      loadMoreLock.current = false;
-    }
-  }, []);
+  }, [results, selectedId]);
 
   useEffect(() => {
     setHistory(loadHistory());
@@ -367,14 +231,6 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         if (Array.isArray(data.folders)) setFolders(data.folders);
       })
       .catch(() => undefined);
-  }, []);
-
-  // Idle feed: load when no active search
-  useEffect(() => {
-    const q = searchParams.get("q");
-    if (q?.trim()) return;
-    void loadRecent(1, false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const syncUrl = useCallback(
@@ -412,8 +268,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
     setHasMore(false);
     setPage(1);
     router.replace(pathname, { scroll: false });
-    void loadRecent(1, false);
-  }, [loadRecent, pathname, router]);
+  }, [pathname, router]);
 
   const runSearch = useCallback(
     async (
@@ -438,7 +293,6 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         setSearched(false);
         setError(null);
         setSelectedId(null);
-        void loadRecent(1, false);
         return;
       }
 
@@ -526,7 +380,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
         }
       }
     },
-    [loadRecent, syncUrl]
+    [syncUrl]
   );
 
   // Initial search from URL
@@ -612,32 +466,19 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
   }
 
   const loadMore = useCallback(() => {
-    if (searched) {
-      if (loadMoreLock.current || !hasMore || loading || loadingMore) return;
-      loadMoreLock.current = true;
-      void runSearch({
-        q: query,
-        folder,
-        titleOnly,
-        sort,
-        from: dateFrom,
-        to: dateTo,
-        page: page + 1,
-        append: true,
-      });
-      return;
-    }
-    if (
-      loadMoreLock.current ||
-      !recentHasMore ||
-      recentLoading ||
-      recentLoadingMore
-    ) {
-      return;
-    }
-    void loadRecent(recentPage + 1, true);
+    if (loadMoreLock.current || !hasMore || loading || loadingMore) return;
+    loadMoreLock.current = true;
+    void runSearch({
+      q: query,
+      folder,
+      titleOnly,
+      sort,
+      from: dateFrom,
+      to: dateTo,
+      page: page + 1,
+      append: true,
+    });
   }, [
-    searched,
     hasMore,
     loading,
     loadingMore,
@@ -649,20 +490,14 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
     dateTo,
     page,
     runSearch,
-    recentHasMore,
-    recentLoading,
-    recentLoadingMore,
-    recentPage,
-    loadRecent,
   ]);
 
   const emptyLibrary = documentCount === 0;
-  const showFeed = !searched && !emptyLibrary;
+  const showSummary = !searched && !emptyLibrary;
   const dateRangeLabel = summary
     ? formatDateRange(summary.oldestCreated, summary.newestCreated)
     : null;
   const shownSearch = results.length;
-  const shownRecent = recent.length;
   const searchTotalLabel = countIsPartial
     ? `${count.toLocaleString("id-ID")}+`
     : count.toLocaleString("id-ID");
@@ -685,7 +520,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
           </p>
           <p className="mt-2 max-w-xl text-sm text-[var(--auth-ink)]/50">
             Cari di judul dan isi OCR dokumen Anda. Tanpa kata kunci, lihat
-            dokumen scan terbaru.
+            ringkasan sync dari cloud.
           </p>
           <p className="mt-1 text-[11px] text-[var(--auth-ink)]/35">
             {documentCount.toLocaleString("id-ID")} dokumen siap dicari
@@ -694,7 +529,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
           {emptyLibrary && (
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-y border-[var(--auth-ink)]/[0.06] py-3">
               <p className="text-sm text-[var(--auth-ink)]/55">
-                Belum ada dokumen ter-index. Ambil PDF lewat Library dulu.
+                Belum ada dokumen ter-index. Ambil dokumen lewat Library dulu.
               </p>
               <Link
                 href="/cloud"
@@ -918,146 +753,9 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
             </p>
           )}
 
-          {/* Idle: scan history feed */}
-          {showFeed && (
-            <>
-              <div className="mb-4 flex flex-wrap items-end justify-between gap-2 border-b border-[var(--auth-ink)]/[0.06] pb-3">
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-ink)]/30">
-                    Riwayat scan
-                  </p>
-                  <p className="mt-1 text-sm font-semibold text-[var(--auth-ink)]">
-                    Scan terbaru
-                    {recentTotal > 0 && (
-                      <span className="font-normal text-[var(--auth-ink)]/45">
-                        {" "}
-                        · {shownRecent.toLocaleString("id-ID")}
-                        {recentTotal > shownRecent
-                          ? ` dari ${recentTotal.toLocaleString("id-ID")}`
-                          : ""}{" "}
-                        dokumen
-                      </span>
-                    )}
-                  </p>
-                </div>
-                <p className="text-[11px] text-[var(--auth-ink)]/30">
-                  Terbaru di atas
-                </p>
-              </div>
-
-              {recentError && (
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-red-700">
-                  <p>{recentError}</p>
-                  <button
-                    type="button"
-                    onClick={() => void loadRecent(1, false)}
-                    className="text-[12px] font-semibold text-[var(--auth-teal)]"
-                  >
-                    Coba lagi
-                  </button>
-                </div>
-              )}
-
-              {recentLoading && recent.length === 0 && (
-                <p className="flex items-center gap-2 py-8 text-sm text-[var(--auth-ink)]/40">
-                  <Loader2
-                    size={14}
-                    className="animate-spin text-[var(--auth-teal)]"
-                  />
-                  Memuat dokumen terbaru…
-                </p>
-              )}
-
-              {!recentLoading && recent.length === 0 && (
-                <p className="py-12 text-center text-sm text-[var(--auth-ink)]/35">
-                  Belum ada dokumen siap. Ambil PDF dari Library, atau ketik kata
-                  kunci untuk mencari.
-                </p>
-              )}
-
-              {recent.length > 0 && (
-                <ul className="space-y-0">
-                  {recent.map((doc) => (
-                    <li
-                      key={doc.id}
-                      className="border-t border-[var(--auth-ink)]/[0.07] last:border-b"
-                    >
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => openPreview(doc.paperlessDocumentId)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            openPreview(doc.paperlessDocumentId);
-                          }
-                        }}
-                        className={cn(
-                          "group flex w-full cursor-pointer flex-col gap-1.5 py-4 text-left transition hover:pl-1",
-                          selectedId === doc.paperlessDocumentId && "pl-1"
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <DocPreviewLink
-                            docId={doc.paperlessDocumentId}
-                            className={cn(
-                              "text-[15px] font-semibold leading-snug",
-                              selectedId === doc.paperlessDocumentId
-                                ? "text-[var(--auth-teal-deep)]"
-                                : "text-[var(--auth-ink)] group-hover:text-[var(--auth-teal)]"
-                            )}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {doc.displayName || humanizeFileName(doc.fileName)}
-                          </DocPreviewLink>
-                          <span
-                            className="shrink-0 text-[11px] text-[var(--auth-ink)]/35"
-                            title={formatShortDate(
-                              doc.lastSyncedAt || doc.updatedAt
-                            )}
-                          >
-                            {formatRelativeSync(
-                              doc.lastSyncedAt || doc.updatedAt
-                            )}
-                          </span>
-                        </div>
-                        {doc.remotePath && (
-                          <p className="flex items-start gap-1 text-[11px] text-[var(--auth-ink)]/40">
-                            <FolderOpen
-                              size={11}
-                              className="mt-0.5 shrink-0"
-                            />
-                            <span className="truncate">{doc.remotePath}</span>
-                          </p>
-                        )}
-                        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
-                          <span className="inline-flex items-center gap-1 text-[var(--auth-teal)]">
-                            <Eye size={11} />
-                            Preview
-                          </span>
-                          <Link
-                            href={askAiHref(doc.paperlessDocumentId)}
-                            onClick={(e) => e.stopPropagation()}
-                            className="inline-flex items-center gap-1 font-medium text-[var(--auth-ink)]/45 hover:text-[var(--auth-teal)]"
-                          >
-                            <MessageSquare size={11} />
-                            Tanya Ask AI
-                          </Link>
-                          <a
-                            href={`/api/documents/${doc.paperlessDocumentId}/download`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="inline-flex items-center gap-1 text-[var(--auth-ink)]/35 hover:text-[var(--auth-ink)]"
-                          >
-                            <Download size={11} />
-                            Unduh
-                          </a>
-                        </div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
+          {/* Idle: sync summary */}
+          {showSummary && (
+            <CloudSyncSummaryPanel variant="search" showIndexedHint />
           )}
 
           {loading && results.length === 0 && searched && (
@@ -1254,25 +952,19 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
             </>
           )}
 
-          {/* Load more (manual) */}
-          {((showFeed && recentHasMore) || (searched && hasMore)) && (
+          {searched && hasMore && (
             <div className="flex flex-col items-center gap-2 border-t border-[var(--auth-ink)]/[0.06] py-8">
               <p className="text-[11px] text-[var(--auth-ink)]/35">
-                {searched
-                  ? `Menampilkan ${shownSearch.toLocaleString("id-ID")} dari ${searchTotalLabel}`
-                  : `Menampilkan ${shownRecent.toLocaleString("id-ID")} dari ${recentTotal.toLocaleString("id-ID")}`}
+                Menampilkan {shownSearch.toLocaleString("id-ID")} dari{" "}
+                {searchTotalLabel}
               </p>
               <button
                 type="button"
-                disabled={
-                  searched
-                    ? loadingMore || loading
-                    : recentLoadingMore || recentLoading
-                }
+                disabled={loadingMore || loading}
                 onClick={() => loadMore()}
                 className="inline-flex min-h-[40px] min-w-[200px] items-center justify-center gap-2 bg-[var(--auth-teal)] px-5 text-[12px] font-bold uppercase tracking-wider text-white transition hover:bg-[var(--auth-teal-deep)] disabled:opacity-40"
               >
-                {(searched ? loadingMore : recentLoadingMore) ? (
+                {loadingMore ? (
                   <>
                     <Loader2 size={14} className="animate-spin" />
                     Memuat…
@@ -1282,11 +974,6 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                 )}
               </button>
             </div>
-          )}
-          {showFeed && !recentHasMore && recent.length > 0 && !recentLoading && (
-            <p className="py-6 text-center text-[11px] text-[var(--auth-ink)]/30">
-              Semua scan terbaru sudah ditampilkan
-            </p>
           )}
           {searched &&
             !hasMore &&

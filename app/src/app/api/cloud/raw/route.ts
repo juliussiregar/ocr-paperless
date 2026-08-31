@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getUserBappenasCreds } from "@/lib/bappenas";
 import { createUserWebDav } from "@/lib/webdav";
+import { isIngestibleFileName } from "@/lib/file-types";
 import { rateLimit } from "@/lib/rate-limit";
 import { writeAudit } from "@/lib/audit";
 
@@ -21,8 +22,9 @@ export async function GET(request: NextRequest) {
   }
 
   const pathParam = request.nextUrl.searchParams.get("path") ?? "";
-  if (!pathParam || !pathParam.toLowerCase().endsWith(".pdf")) {
-    return NextResponse.json({ error: "path PDF required" }, { status: 400 });
+  const fileName = pathParam.split("/").filter(Boolean).pop() ?? pathParam;
+  if (!pathParam || !isIngestibleFileName(fileName, null)) {
+    return NextResponse.json({ error: "path dokumen tidak valid" }, { status: 400 });
   }
   const remotePath = pathParam.startsWith("/") ? pathParam : `/${pathParam}`;
 
@@ -37,16 +39,16 @@ export async function GET(request: NextRequest) {
   try {
     const client = createUserWebDav(creds.url, creds.username, creds.password);
     const buf = await client.downloadFile(remotePath);
-    const fileName =
-      remotePath.split("/").filter(Boolean).pop() ?? "document.pdf";
+    const outName =
+      remotePath.split("/").filter(Boolean).pop() ?? "document";
 
     await writeAudit("cloud.raw_download", session.user.id, { remotePath });
 
     return new NextResponse(new Uint8Array(buf), {
       status: 200,
       headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(fileName)}"`,
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${encodeURIComponent(outName)}"`,
         "Content-Length": String(buf.length),
         "Cache-Control": "private, no-store",
       },

@@ -10,7 +10,7 @@ if ! $PRISMA migrate deploy --schema="$SCHEMA"; then
 fi
 
 echo "Syncing schema (prisma db push)..."
-if ! $PRISMA db push --schema="$SCHEMA" --skip-generate; then
+if ! $PRISMA db push --schema="$SCHEMA" --skip-generate --accept-data-loss; then
   echo "WARN: prisma db push failed; continuing to start Next.js"
 fi
 

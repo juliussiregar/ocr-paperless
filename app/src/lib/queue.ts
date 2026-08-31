@@ -4,7 +4,6 @@ import { Queue } from "bullmq";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 
 let connection: Redis | null = null;
-let scanQueue: Queue | null = null;
 
 export function getRedis(): Redis {
   if (!connection) {
@@ -13,20 +12,26 @@ export function getRedis(): Redis {
   return connection;
 }
 
-export function getScanQueue(): Queue {
-  if (!scanQueue) {
-    scanQueue = new Queue("scan-jobs", { connection: getRedis() });
-  }
-  return scanQueue;
+function getDiscoverQueue(): Queue {
+  return new Queue("scan-discover", { connection: getRedis() });
 }
 
-export async function enqueueScanJob(jobId: string): Promise<void> {
-  const queue = getScanQueue();
+function getIngestQueue(): Queue {
+  return new Queue("scan-ingest", { connection: getRedis() });
+}
+
+export async function enqueueScanJob(
+  jobId: string,
+  jobType?: string
+): Promise<void> {
+  const isIngest = jobType === "ingest_paths";
+  const queue = isIngest ? getIngestQueue() : getDiscoverQueue();
+  const prefix = isIngest ? "ingest" : "discover";
   await queue.add(
-    "scan",
+    prefix,
     { jobId },
     {
-      jobId: `scan-${jobId}`,
+      jobId: `${prefix}-${jobId}`,
       removeOnComplete: 100,
       removeOnFail: 50,
     }

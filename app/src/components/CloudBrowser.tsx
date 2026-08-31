@@ -45,6 +45,7 @@ import {
   formatSyncAge,
 } from "@/lib/bappenas";
 import { DocPreviewLink } from "@/components/DocPreviewLink";
+import { CloudSyncSummaryPanel } from "@/components/CloudSyncSummaryPanel";
 import {
   DocumentPreviewSheet,
   PREVIEW_DEFAULT,
@@ -55,6 +56,7 @@ import {
 import { FolderTreeSidebar, type TreeFileOpen } from "@/components/FolderTreeSidebar";
 import { formatSize } from "@/lib/format-size";
 import type { CloudFolderHint } from "@/lib/cloud-folder-hint";
+import { folderDisplaySizeBytes } from "@/lib/folder-display-size";
 
 type IngestStatus = "not_ingested" | "processing" | "done" | "failed" | null;
 
@@ -76,6 +78,7 @@ type CloudItem = {
   lastModified: string | null;
   mimeType: string | null;
   isPdf: boolean;
+  isIngestible?: boolean;
   ingestStatus: IngestStatus;
   syncStage: string | null;
   errorMessage: string | null;
@@ -84,6 +87,7 @@ type CloudItem = {
   isZeroByte: boolean;
   folderStats: FolderStats | null;
   cloudHint: CloudFolderHint | null;
+  folderSizeBytes: number | null;
   selectable: boolean;
 };
 
@@ -252,6 +256,13 @@ function fileSizeLabel(item: CloudItem): string {
   return cloud;
 }
 
+function folderSizeForItem(
+  item: CloudItem,
+  hint: CloudFolderHint | null | undefined
+): number | null {
+  return folderDisplaySizeBytes(item.folderStats, hint);
+}
+
 function FolderMetaLine({
   stats,
   cloudHint,
@@ -281,7 +292,20 @@ function FolderMetaLine({
   }
 
   const cloudSegments: React.ReactNode[] = [];
-  if (cloudHint && cloudHint.pdfCount > 0) {
+  if (cloudHint && cloudHint.docCount > 0) {
+    cloudSegments.push(
+      <span key="cloud-doc">
+        {cloudHint.docCount} dokumen di cloud · {formatSize(cloudHint.totalDocSize)}
+      </span>
+    );
+    if (cloudHint.zeroByteDocs > 0) {
+      cloudSegments.push(
+        <span key="cloud-zero" className="font-medium text-amber-700">
+          {cloudHint.zeroByteDocs} file 0 B
+        </span>
+      );
+    }
+  } else if (cloudHint && cloudHint.pdfCount > 0) {
     cloudSegments.push(
       <span key="cloud-pdf">
         {cloudHint.pdfCount} PDF di cloud · {formatSize(cloudHint.totalPdfSize)}
@@ -415,6 +439,7 @@ function resolveFolderVisualState(
   const hasIssue =
     (stats?.failedCount ?? 0) > 0 ||
     (stats?.zeroByteCount ?? 0) > 0 ||
+    (cloudHint?.zeroByteDocs ?? 0) > 0 ||
     (cloudHint?.zeroBytePdfs ?? 0) > 0;
   if (hasIssue) return "issue";
 
@@ -425,7 +450,7 @@ function resolveFolderVisualState(
     if (stats.pendingCount > 0) return "pending";
   }
 
-  if (cloudHint && cloudHint.pdfCount > 0) return "cloud_only";
+  if (cloudHint && (cloudHint.docCount > 0 || cloudHint.pdfCount > 0)) return "cloud_only";
   if (cloudHint && (cloudHint.dirCount > 0 || cloudHint.fileCount > 0)) {
     return "cloud_only";
   }
@@ -681,14 +706,29 @@ function CloudBrowserInner() {
   const [previewWidth, setPreviewWidth] = useState(PREVIEW_DEFAULT);
   const [previewResizing, setPreviewResizing] = useState(false);
   const cloudHintCache = useRef(new Map<string, CloudFolderHint>());
+  const browseCacheRef = useRef(
+    new Map<
+      string,
+      {
+        items: CloudItem[];
+        breadcrumbs: Breadcrumb[];
+        listingCachedAt: string | null;
+        listingStale: boolean;
+      }
+    >()
+  );
   const cloudHintInflight = useRef(new Set<string>());
   const cloudHintHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(
     null
   );
-  const [, setCloudHintRevision] = useState(0);
+  const [cloudHintRevision, setCloudHintRevision] = useState(0);
   const [cloudHintLoadingPaths, setCloudHintLoadingPaths] = useState<
     Set<string>
   >(() => new Set());
+  const [listingMeta, setListingMeta] = useState<{
+    cachedAt: string | null;
+    stale: boolean;
+  }>({ cachedAt: null, stale: false });
   const [queue, setQueue] = useState<{
     ocrPending: number;
     downloading: number;
@@ -847,18 +887,15 @@ function CloudBrowserInner() {
   }, [queueLimit]);
 
   const load = useCallback(
-    async (targetPath: string, silent = false) => {
+    async (targetPath: string, silent = false, refresh = false) => {
       const nextPath = normalizeFolderPath(targetPath);
+      const browseUrl = `/api/cloud/browse?path=${encodeURIComponent(
+        targetPath
+      )}${refresh ? "&refresh=1" : ""}`;
 
-      // Soft refresh during scan poll must not race with folder clicks:
-      // - do not bump browseReqId / abort navigation
-      // - do not clear the list
-      // - only apply if user is still on that folder
       if (silent) {
         try {
-          const res = await fetch(
-            `/api/cloud/browse?path=${encodeURIComponent(targetPath)}`
-          );
+          const res = await fetch(browseUrl);
           if (normalizeFolderPath(pathRef.current) !== nextPath) return;
           const data = await res.json();
           if (normalizeFolderPath(pathRef.current) !== nextPath) return;
@@ -866,31 +903,53 @@ function CloudBrowserInner() {
           setCredsMissing(false);
           setBreadcrumbs(data.breadcrumbs ?? breadcrumbsForPath(data.path));
           setItems(data.items ?? []);
+          setListingMeta({
+            cachedAt: data.listingCachedAt ?? null,
+            stale: Boolean(data.listingStale),
+          });
+          browseCacheRef.current.set(nextPath, {
+            items: data.items ?? [],
+            breadcrumbs: data.breadcrumbs ?? breadcrumbsForPath(data.path),
+            listingCachedAt: data.listingCachedAt ?? null,
+            listingStale: Boolean(data.listingStale),
+          });
         } catch {
           // ignore soft-refresh errors
         }
         return;
       }
 
+      const clientCached = !refresh ? browseCacheRef.current.get(nextPath) : null;
+
       const reqId = ++browseReqId.current;
       browseAbortRef.current?.abort();
       const ac = new AbortController();
       browseAbortRef.current = ac;
 
-      setLoading(true);
-      setError(null);
-      setPath(nextPath);
-      setBreadcrumbs(breadcrumbsForPath(nextPath));
-      // Leave old list immediately so navigation doesn't feel like a long refresh
-      setItems([]);
-      setSelected(new Set());
-      setFocusIndex(-1);
+      if (clientCached) {
+        setPath(nextPath);
+        setBreadcrumbs(clientCached.breadcrumbs);
+        setItems(clientCached.items);
+        setListingMeta({
+          cachedAt: clientCached.listingCachedAt,
+          stale: clientCached.listingStale,
+        });
+        setSelected(new Set());
+        setFocusIndex(-1);
+        setLoading(true);
+        setError(null);
+      } else {
+        setLoading(true);
+        setError(null);
+        setPath(nextPath);
+        setBreadcrumbs(breadcrumbsForPath(nextPath));
+        setItems([]);
+        setSelected(new Set());
+        setFocusIndex(-1);
+      }
 
       try {
-        const res = await fetch(
-          `/api/cloud/browse?path=${encodeURIComponent(targetPath)}`,
-          { signal: browseAbortRef.current.signal }
-        );
+        const res = await fetch(browseUrl, { signal: ac.signal });
         if (reqId !== browseReqId.current) return;
 
         const data = await res.json();
@@ -907,13 +966,15 @@ function CloudBrowserInner() {
           ) {
             setCredsMissing(true);
           }
-          if (targetPath !== "/") {
+          if (targetPath !== "/" && !clientCached) {
             clearLastFolder();
             await load("/", false);
             return;
           }
-          setError(errMsg);
-          setItems([]);
+          if (!clientCached) {
+            setError(errMsg);
+            setItems([]);
+          }
           return;
         }
         setCredsMissing(false);
@@ -922,18 +983,49 @@ function CloudBrowserInner() {
         setItems(data.items ?? []);
         setSelected(new Set());
         setFocusIndex(-1);
+        setListingMeta({
+          cachedAt: data.listingCachedAt ?? null,
+          stale: Boolean(data.listingStale),
+        });
+        browseCacheRef.current.set(nextPath, {
+          items: data.items ?? [],
+          breadcrumbs: data.breadcrumbs ?? [],
+          listingCachedAt: data.listingCachedAt ?? null,
+          listingStale: Boolean(data.listingStale),
+        });
         saveLastFolder(data.path);
         syncPathUrl(data.path);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (reqId !== browseReqId.current) return;
-        setError("Gagal memuat folder");
-        setItems([]);
+        if (!clientCached) {
+          setError("Gagal memuat folder");
+          setItems([]);
+        }
       } finally {
         if (reqId === browseReqId.current) setLoading(false);
       }
     },
     [syncPathUrl]
+  );
+
+  const invalidateCachesAfterIngest = useCallback(
+    async (folderPath: string) => {
+      browseCacheRef.current.clear();
+      cloudHintCache.current.clear();
+      try {
+        await fetch("/api/cloud/cache/invalidate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paths: [folderPath || "/"] }),
+        });
+        window.dispatchEvent(new Event("cloud-cache-invalidated"));
+      } catch {
+        // ignore
+      }
+      void load(folderPath || "/", false, true);
+    },
+    [load]
   );
 
   const clearSearch = useCallback(() => {
@@ -1241,6 +1333,7 @@ function CloudBrowserInner() {
             setIngestProgress(null);
           }
           if (job.status === "COMPLETED") {
+            void invalidateCachesAfterIngest(pathRef.current || "/");
             const msg =
               job.totalFiles === 0 && job.errorMessage
                 ? job.errorMessage
@@ -1275,7 +1368,7 @@ function CloudBrowserInner() {
     return () => {
       cancelled = true;
     };
-  }, [ingestJobId, load, loadRecent, loadQueue, refreshFavoriteCounts]);
+  }, [ingestJobId, load, loadRecent, loadQueue, refreshFavoriteCounts, invalidateCachesAfterIngest]);
 
   useEffect(() => {
     if (!watchingOcr || !ingestJobId) return;
@@ -1318,6 +1411,7 @@ function CloudBrowserInner() {
         setWatchingOcr(false);
         await loadRecent();
         void refreshFavoriteCounts(true);
+        void invalidateCachesAfterIngest(pathRef.current || "/");
         const folderPath = pathRef.current || "/";
         const normalized =
           !folderPath || folderPath === "/"
@@ -1363,7 +1457,7 @@ function CloudBrowserInner() {
     return () => {
       cancelled = true;
     };
-  }, [watchingOcr, ingestJobId, load, loadRecent, refreshFavoriteCounts]);
+  }, [watchingOcr, ingestJobId, load, loadRecent, refreshFavoriteCounts, invalidateCachesAfterIngest]);
 
   const selectableItems = useMemo(
     () => items.filter((i) => i.selectable),
@@ -1380,7 +1474,9 @@ function CloudBrowserInner() {
   const visibleItems = useMemo(() => {
     let list = [...items];
     if (pdfOnly) {
-      list = list.filter((i) => i.type === "directory" || i.isPdf);
+      list = list.filter(
+        (i) => i.type === "directory" || (i.isIngestible ?? i.isPdf)
+      );
     }
     if (statusFilter !== "all") {
       list = list.filter(
@@ -1395,7 +1491,23 @@ function CloudBrowserInner() {
         const bt = b.lastModified ? new Date(b.lastModified).getTime() : 0;
         return bt - at;
       }
-      if (sort === "size") return (b.size ?? 0) - (a.size ?? 0);
+      if (sort === "size") {
+        const sizeA =
+          a.type === "directory"
+            ? folderSizeForItem(
+                a,
+                cloudHintCache.current.get(a.path) ?? a.cloudHint
+              ) ?? 0
+            : a.size ?? 0;
+        const sizeB =
+          b.type === "directory"
+            ? folderSizeForItem(
+                b,
+                cloudHintCache.current.get(b.path) ?? b.cloudHint
+              ) ?? 0
+            : b.size ?? 0;
+        return sizeB - sizeA;
+      }
       if (sort === "status") {
         return statusRank(a.ingestStatus) - statusRank(b.ingestStatus);
       }
@@ -1405,7 +1517,7 @@ function CloudBrowserInner() {
       );
     });
     return list;
-  }, [items, pdfOnly, statusFilter, sort]);
+  }, [items, pdfOnly, statusFilter, sort, cloudHintRevision]);
 
   useEffect(() => {
     setFocusIndex((i) => {
@@ -1418,7 +1530,7 @@ function CloudBrowserInner() {
   const duplicateNames = useMemo(() => {
     const counts = new Map<string, number>();
     for (const i of items) {
-      if (i.type !== "file" || !i.isPdf) continue;
+      if (i.type !== "file" || !(i.isIngestible ?? i.isPdf)) continue;
       const key = humanizeFileName(i.name).toLowerCase();
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -1501,7 +1613,7 @@ function CloudBrowserInner() {
 
   async function handleIngestSelected() {
     if (selected.size === 0) {
-      showToast("Pilih minimal satu PDF", "error");
+      showToast("Pilih minimal satu dokumen", "error");
       return;
     }
     await startJob(
@@ -1780,10 +1892,14 @@ function CloudBrowserInner() {
               Library
             </p>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-[var(--auth-ink)]/55">
-              Buka folder, pilih PDF, lalu scan agar teks bisa dicari dan
+              Buka folder, pilih dokumen, lalu scan agar teks bisa dicari dan
               ditanya di Ask AI.
             </p>
           </div>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-[var(--auth-teal)]/15 bg-white/70 px-4 py-4 shadow-sm">
+          <CloudSyncSummaryPanel variant="library" />
         </div>
 
         {postIngestAsk && (
@@ -2166,6 +2282,26 @@ function CloudBrowserInner() {
                   </span>
                 ))}
               </nav>
+              {listingMeta.cachedAt && (
+                <span
+                  className={cn(
+                    "text-[10px] text-[var(--auth-ink)]/35",
+                    listingMeta.stale && "text-amber-700"
+                  )}
+                >
+                  {listingMeta.stale ? "Cache kedaluwarsa" : "Cache aktif"}
+                </span>
+              )}
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => void load(path, false, true)}
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-[var(--auth-ink)]/45 hover:bg-white/60 hover:text-[var(--auth-teal)] disabled:opacity-50"
+                title="Refresh listing cloud untuk folder ini"
+              >
+                <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
+                Refresh folder
+              </button>
               <button
                 type="button"
                 onClick={() => void toggleFavorite()}
@@ -2240,7 +2376,7 @@ function CloudBrowserInner() {
                   onChange={(e) => setPdfOnly(e.target.checked)}
                   className="accent-[var(--auth-teal)]"
                 />
-                PDF only
+                Dokumen saja
               </label>
               <select
                 value={sort}
@@ -2482,9 +2618,17 @@ function CloudBrowserInner() {
               >
                 {visibleItems.map((item, idx) => {
                   const display = humanizeFileName(item.name);
+                  const folderHint =
+                    item.type === "directory"
+                      ? cloudHintCache.current.get(item.path) ?? item.cloudHint
+                      : null;
+                  const folderSize =
+                    item.type === "directory"
+                      ? folderSizeForItem(item, folderHint)
+                      : null;
                   const isDup =
                     item.type === "file" &&
-                    item.isPdf &&
+                    (item.isIngestible ?? item.isPdf) &&
                     duplicateNames.has(display.toLowerCase());
                   const focused = focusIndex === idx;
                   return (
@@ -2497,7 +2641,7 @@ function CloudBrowserInner() {
                       )}
                       onMouseEnter={() => setFocusIndex(idx)}
                     >
-                      {item.type === "file" && item.isPdf ? (
+                      {item.type === "file" && (item.isIngestible ?? item.isPdf) ? (
                         <input
                           type="checkbox"
                           className="h-4 w-4 accent-[var(--auth-teal)]"
@@ -2602,7 +2746,7 @@ function CloudBrowserInner() {
                               {item.lastModified &&
                                 ` · ${new Date(item.lastModified).toLocaleDateString("id-ID")}`}
                             </p>
-                            {item.isPdf &&
+                            {(item.isIngestible ?? item.isPdf) &&
                               (item.ingestStatus === "processing" ||
                                 item.ingestStatus === "failed") && (
                                 <FileProgress
@@ -2620,6 +2764,19 @@ function CloudBrowserInner() {
 
                       {item.type === "directory" && (
                         <FolderStatusChip stats={item.folderStats} />
+                      )}
+
+                      {item.type === "directory" && (
+                        <span
+                          className="hidden shrink-0 text-right text-[11px] font-medium tabular-nums text-[var(--auth-ink)]/45 sm:block sm:min-w-[4.5rem]"
+                          title={
+                            folderSize != null
+                              ? "Ukuran tercatat atau dari cache listing cloud"
+                              : "Buka atau arahkan folder untuk ukuran"
+                          }
+                        >
+                          {folderSize != null ? formatSize(folderSize) : "-"}
+                        </span>
                       )}
 
                       {item.type === "file" && (
@@ -2643,7 +2800,7 @@ function CloudBrowserInner() {
                         />
                       )}
 
-                      {item.type === "file" && item.isPdf && (
+                      {item.type === "file" && (item.isIngestible ?? item.isPdf) && (
                         <a
                           href={`/api/cloud/raw?path=${encodeURIComponent(item.path)}`}
                           className="shrink-0 text-[11px] text-[var(--auth-ink)]/40 hover:text-[var(--auth-teal)]"

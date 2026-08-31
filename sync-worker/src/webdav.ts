@@ -4,10 +4,13 @@ import { mkdir, rename, unlink } from "fs/promises";
 import { join } from "path";
 import { Readable } from "stream";
 import { createClient, type FileStat } from "webdav";
+import { isIngestibleFileName } from "./file-types.js";
 
 export interface RemoteFile {
   path: string;
   basename: string;
+  /** Nextcloud oc:fileid when available (stable across move/rename). */
+  fileId: string | null;
   etag: string | null;
   lastModified: Date | null;
   /** null when WebDAV omitted size (do not treat as empty). */
@@ -22,16 +25,12 @@ export class ScanAbortedError extends Error {
   }
 }
 
-const PDF_MIME = "application/pdf";
-const PDF_EXT = ".pdf";
 const CONSUME_DIR = process.env.CONSUME_DIR ?? "/consume";
 const SYNC_TEMP = process.env.SYNC_TEMP_DIR ?? "/tmp/sync";
 
-function isPdfFile(item: FileStat): boolean {
+function isIngestibleFile(item: FileStat): boolean {
   if (item.type !== "file") return false;
-  const mime = item.mime ?? "";
-  const name = item.basename.toLowerCase();
-  return mime === PDF_MIME || name.endsWith(PDF_EXT);
+  return isIngestibleFileName(item.basename, item.mime ?? null);
 }
 
 function normalizeEtag(etag: unknown): string | null {
@@ -47,14 +46,30 @@ function discoveryConcurrency(): number {
   return Math.min(24, Math.max(1, Math.floor(n)));
 }
 
+function extractFileId(item: FileStat): string | null {
+  const raw = item as FileStat & Record<string, unknown>;
+  const candidates = [
+    raw.fileid,
+    raw.fileId,
+    raw["oc:fileid"],
+    raw["OC:fileid"],
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+    if (typeof c === "number" && Number.isFinite(c)) return String(c);
+  }
+  return null;
+}
+
 function toRemoteFile(item: FileStat): RemoteFile {
   return {
     path: item.filename,
     basename: item.basename,
+    fileId: extractFileId(item),
     etag: normalizeEtag(item.etag),
     lastModified: item.lastmod ? new Date(item.lastmod) : null,
     size: typeof item.size === "number" && Number.isFinite(item.size) ? item.size : null,
-    mimeType: item.mime ?? PDF_MIME,
+    mimeType: item.mime ?? null,
   };
 }
 
@@ -62,6 +77,12 @@ function dirLastmodMs(item: FileStat): number {
   if (!item.lastmod) return 0;
   const t = new Date(item.lastmod).getTime();
   return Number.isFinite(t) ? t : 0;
+}
+
+function dirLastmodDate(item: FileStat): Date | null {
+  if (!item.lastmod) return null;
+  const d = new Date(item.lastmod);
+  return Number.isFinite(d.getTime()) ? d : null;
 }
 
 function fileLastmodMs(file: RemoteFile): number {
@@ -83,7 +104,7 @@ type WalkProgress = {
  * folders and can stop early once top-N pending PDFs cannot be beaten by
  * remaining folders (Nextcloud folder mtime ≈ newest child activity).
  */
-async function walkPdfTree(options: {
+async function walkDocumentTree(options: {
   client: ReturnType<typeof createClient>;
   rootPath: string;
   shouldAbort?: () => Promise<boolean>;
@@ -91,6 +112,17 @@ async function walkPdfTree(options: {
   /** If set, stop once we have this many PDFs not in excludePaths (newest-first). */
   newestLimit?: number;
   excludePaths?: Set<string>;
+  /** Skip listing subtree when folder mtime/etag unchanged (Phase 4). */
+  shouldSkipDir?: (
+    dirPath: string,
+    dirLastModified: Date | null,
+    dirEtag: string | null
+  ) => boolean;
+  onDirListed?: (
+    dirPath: string,
+    dirLastModified: Date | null,
+    dirEtag: string | null
+  ) => void | Promise<void>;
 }): Promise<{
   files: RemoteFile[];
   skippedDirs: string[];
@@ -200,7 +232,12 @@ async function walkPdfTree(options: {
 
     let items: FileStat | FileStat[];
     try {
-      items = await options.client.getDirectoryContents(dir);
+      const raw = await options.client.getDirectoryContents(dir, {
+        details: true,
+      });
+      items = Array.isArray(raw)
+        ? raw
+        : ((raw as { data?: FileStat[] }).data ?? []);
     } catch (err) {
       console.warn(
         `[webdav] skip dir ${dir}:`,
@@ -211,19 +248,41 @@ async function walkPdfTree(options: {
       return;
     }
 
-    // Always consume this listing (in-flight work was already paid for).
-    // Only skip enqueueing more children once earlyStop is set.
     const list = Array.isArray(items) ? items : [items];
     dirsVisited++;
+
+    const dirItem = list.find(
+      (item) =>
+        item.type === "directory" &&
+        (item.filename === dir || item.filename === `${dir}/`)
+    );
+    const dirLastmod = dirItem?.lastmod
+      ? new Date(dirItem.lastmod)
+      : dirMtime > 0
+        ? new Date(dirMtime)
+        : null;
+    const dirEtag = dirItem ? normalizeEtag(dirItem.etag) : null;
+    await options.onDirListed?.(dir, dirLastmod, dirEtag);
 
     for (const item of list) {
       if (aborted) break;
       if (item.type === "directory") {
         if (item.filename === dir || item.filename === `${dir}/`) continue;
-        if (!earlyStop) pushDir(item.filename, dirLastmodMs(item));
+        if (!earlyStop) {
+          const childMtime = dirLastmodMs(item);
+          const childEtag = normalizeEtag(item.etag);
+          const childPath = item.filename;
+          if (
+            options.shouldSkipDir?.(childPath, dirLastmodDate(item), childEtag)
+          ) {
+            skippedDirs.push(childPath);
+            continue;
+          }
+          pushDir(childPath, childMtime);
+        }
         continue;
       }
-      if (!isPdfFile(item)) continue;
+      if (!isIngestibleFile(item)) continue;
       results.push(toRemoteFile(item));
     }
 
@@ -321,18 +380,30 @@ export function createWebDavClient(
     password,
   });
 
-  async function listAllPdfFiles(options?: {
+  async function listAllDocuments(options?: {
     rootPath?: string;
     shouldAbort?: () => Promise<boolean>;
     onProgress?: (
       found: number,
       meta?: { skippedDirs: number; dirsVisited?: number; earlyStop?: boolean }
     ) => void | Promise<void>;
+    shouldSkipDir?: (
+      dirPath: string,
+      dirLastModified: Date | null,
+      dirEtag: string | null
+    ) => boolean;
+    onDirListed?: (
+      dirPath: string,
+      dirLastModified: Date | null,
+      dirEtag: string | null
+    ) => void | Promise<void>;
   }): Promise<{ files: RemoteFile[]; skippedDirs: string[] }> {
-    const walked = await walkPdfTree({
+    const walked = await walkDocumentTree({
       client,
       rootPath: options?.rootPath ?? "/",
       shouldAbort: options?.shouldAbort,
+      shouldSkipDir: options?.shouldSkipDir,
+      onDirListed: options?.onDirListed,
       onProgress: async (p) => {
         await options?.onProgress?.(p.found, {
           skippedDirs: p.skippedDirs,
@@ -342,7 +413,7 @@ export function createWebDavClient(
       },
     });
     console.log(
-      `[webdav] full discovery: ${walked.files.length} PDFs, ${walked.dirsVisited} dirs, concurrency=${discoveryConcurrency()}`
+      `[webdav] full discovery: ${walked.files.length} documents, ${walked.dirsVisited} dirs, concurrency=${discoveryConcurrency()}`
     );
     return { files: walked.files, skippedDirs: walked.skippedDirs };
   }
@@ -351,7 +422,7 @@ export function createWebDavClient(
    * Find up to `limit` newest PDFs not in excludePaths without necessarily
    * walking the entire tree (parallel + folder-mtime early stop).
    */
-  async function listNewestPdfFiles(options: {
+  async function listNewestDocuments(options: {
     rootPath?: string;
     limit: number;
     excludePaths?: Set<string>;
@@ -372,7 +443,7 @@ export function createWebDavClient(
     dirsVisited: number;
   }> {
     const limit = Math.max(1, options.limit);
-    const walked = await walkPdfTree({
+    const walked = await walkDocumentTree({
       client,
       rootPath: options.rootPath ?? "/",
       shouldAbort: options.shouldAbort,
@@ -546,8 +617,10 @@ export function createWebDavClient(
   }
 
   return {
-    listAllPdfFiles,
-    listNewestPdfFiles,
+    listAllDocuments,
+    listNewestDocuments,
+    listAllPdfFiles: listAllDocuments,
+    listNewestPdfFiles: listNewestDocuments,
     downloadFile,
     downloadToTemp,
     testConnection,

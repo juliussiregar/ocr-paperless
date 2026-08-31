@@ -6,6 +6,7 @@ import { writeAudit } from "@/lib/audit";
 import { rateLimit } from "@/lib/rate-limit";
 import { getUserBappenasCreds } from "@/lib/bappenas";
 import { ScanJobStatus, SyncStatus } from "@prisma/client";
+import { isIngestibleFileName } from "@/lib/file-types";
 import { scanMaxFilesFromEnv } from "@/lib/scan-cleanup";
 import { activeScanJobWhere } from "@/lib/scan-status";
 
@@ -73,13 +74,18 @@ export async function POST(request: NextRequest) {
           rawPaths
             .filter((p): p is string => typeof p === "string" && p.length > 0)
             .map((p) => (p.startsWith("/") ? p : `/${p}`))
-            .filter((p) => p.toLowerCase().endsWith(".pdf"))
+            .filter((p) =>
+              isIngestibleFileName(
+                p.split("/").filter(Boolean).pop() ?? p,
+                null
+              )
+            )
         ),
       ];
 
       if (paths.length === 0) {
         return NextResponse.json(
-          { error: "Pilih minimal satu file PDF" },
+          { error: "Pilih minimal satu file dokumen yang didukung" },
           { status: 400 }
         );
       }

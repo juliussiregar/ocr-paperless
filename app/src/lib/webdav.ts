@@ -1,4 +1,12 @@
 import { createClient, type FileStat } from "webdav";
+import {
+  bumpTypeCount,
+  emptyTypeCounts,
+  fileCategoryFromName,
+  isIngestibleFileName,
+  isPdfFileName,
+  type FileCategory,
+} from "@/lib/file-types";
 
 export type CloudEntryType = "directory" | "file";
 
@@ -9,15 +17,11 @@ export interface CloudEntry {
   size: number | null;
   lastModified: string | null;
   mimeType: string | null;
+  /** Supported document for ingest/OCR (PDF, Office, image, text). */
+  isIngestible: boolean;
+  /** Legacy flag: PDF category. */
   isPdf: boolean;
-}
-
-const PDF_MIME = "application/pdf";
-
-function isPdf(item: FileStat): boolean {
-  const mime = item.mime ?? "";
-  const name = item.basename.toLowerCase();
-  return mime === PDF_MIME || name.endsWith(".pdf");
+  fileCategory: string;
 }
 
 function normalizePath(path: string): string {
@@ -25,6 +29,19 @@ function normalizePath(path: string): string {
   const withSlash = path.startsWith("/") ? path : `/${path}`;
   return withSlash.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
 }
+
+function normalizeEtag(etag: unknown): string | null {
+  if (typeof etag === "string" && etag) {
+    return etag.replace(/^W\//, "").replace(/"/g, "");
+  }
+  return null;
+}
+
+export type DirectoryListing = {
+  entries: CloudEntry[];
+  dirEtag: string | null;
+  dirLastModified: string | null;
+};
 
 export function createUserWebDav(
   baseUrl: string,
@@ -34,15 +51,32 @@ export function createUserWebDav(
   const webdavUrl = `${baseUrl.replace(/\/$/, "")}/remote.php/dav/files/${encodeURIComponent(username)}/`;
   const client = createClient(webdavUrl, { username, password });
 
-  async function listDirectory(path: string): Promise<CloudEntry[]> {
+  async function listDirectory(path: string): Promise<DirectoryListing> {
     const dir = normalizePath(path);
     const items = await client.getDirectoryContents(dir === "/" ? "/" : dir);
     const list = Array.isArray(items) ? items : [items];
 
+    let dirEtag: string | null = null;
+    let dirLastModified: string | null = null;
+    const dirSelf = list.find(
+      (item) =>
+        item.type === "directory" &&
+        (item.filename === dir || item.filename === `${dir}/`)
+    );
+    if (dirSelf) {
+      dirEtag = normalizeEtag(dirSelf.etag);
+      dirLastModified = dirSelf.lastmod
+        ? new Date(dirSelf.lastmod).toISOString()
+        : null;
+    }
+
     const entries: CloudEntry[] = [];
     for (const item of list) {
-      // Skip the directory itself if returned
       if (item.filename === dir || item.filename === `${dir}/`) continue;
+
+      const mime = item.mime ?? null;
+      const ingestible =
+        item.type === "file" && isIngestibleFileName(item.basename, mime);
 
       entries.push({
         type: item.type === "directory" ? "directory" : "file",
@@ -50,18 +84,22 @@ export function createUserWebDav(
         name: item.basename,
         size: typeof item.size === "number" ? item.size : null,
         lastModified: item.lastmod ? new Date(item.lastmod).toISOString() : null,
-        mimeType: item.mime ?? null,
-        isPdf: item.type === "file" && isPdf(item),
+        mimeType: mime,
+        isIngestible: ingestible,
+        isPdf: item.type === "file" && isPdfFileName(item.basename, mime),
+        fileCategory:
+          item.type === "file"
+            ? fileCategoryFromName(item.basename, mime)
+            : "other",
       });
     }
 
-    // Folders first, then files; alpha within group
     entries.sort((a, b) => {
       if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
       return a.name.localeCompare(b.name, "id");
     });
 
-    return entries;
+    return { entries, dirEtag, dirLastModified };
   }
 
   async function downloadFile(remotePath: string): Promise<Buffer> {
@@ -72,10 +110,6 @@ export function createUserWebDav(
     throw new Error(`Unexpected download type for ${remotePath}`);
   }
 
-  /**
-   * BFS filename search across folders. Stops early when maxResults hit
-   * or maxDirs folders have been visited (keeps cloud scans bounded).
-   */
   async function searchByName(
     query: string,
     opts?: { maxResults?: number; maxDirs?: number; root?: string }
@@ -99,7 +133,7 @@ export function createUserWebDav(
 
       let entries: CloudEntry[];
       try {
-        entries = await listDirectory(dir);
+        entries = (await listDirectory(dir)).entries;
       } catch {
         continue;
       }
@@ -109,7 +143,7 @@ export function createUserWebDav(
           queue.push(normalizePath(e.path));
           continue;
         }
-        if (!e.isPdf) continue;
+        if (!e.isIngestible) continue;
         const hay = `${e.name} ${e.path}`.toLowerCase();
         if (hay.includes(q)) {
           hits.push(e);
@@ -121,10 +155,9 @@ export function createUserWebDav(
     return hits;
   }
 
-  /** Count PDFs under a folder (recursive, bounded). */
-  async function countPdfs(
+  async function countDocuments(
     rootPath: string,
-    opts?: { maxDirs?: number; onlyPending?: boolean }
+    opts?: { maxDirs?: number }
   ): Promise<{ total: number; truncated: boolean }> {
     const maxDirs = opts?.maxDirs ?? 500;
     const root = normalizePath(rootPath);
@@ -146,7 +179,7 @@ export function createUserWebDav(
 
       let entries: CloudEntry[];
       try {
-        entries = await listDirectory(dir);
+        entries = (await listDirectory(dir)).entries;
       } catch {
         continue;
       }
@@ -154,7 +187,7 @@ export function createUserWebDav(
       for (const e of entries) {
         if (e.type === "directory") {
           queue.push(normalizePath(e.path));
-        } else if (e.isPdf) {
+        } else if (e.isIngestible) {
           total += 1;
         }
       }
@@ -163,15 +196,85 @@ export function createUserWebDav(
     return { total, truncated };
   }
 
-  /** Count PDFs modified after `since` in a single folder (non-recursive). */
+  async function scanDocuments(
+    rootPath: string,
+    opts?: { maxDirs?: number }
+  ): Promise<{
+    documentCount: number;
+    totalSize: number;
+    zeroByteCount: number;
+    byType: Record<FileCategory, number>;
+    truncated: boolean;
+    dirsVisited: number;
+  }> {
+    const maxDirs = opts?.maxDirs ?? 800;
+    const root = normalizePath(rootPath);
+    const queue = [root];
+    const seen = new Set<string>();
+    let dirsVisited = 0;
+    let documentCount = 0;
+    let totalSize = 0;
+    let zeroByteCount = 0;
+    let truncated = false;
+    const byType = emptyTypeCounts();
+
+    while (queue.length > 0) {
+      if (dirsVisited >= maxDirs) {
+        truncated = true;
+        break;
+      }
+      const dir = queue.shift()!;
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      dirsVisited += 1;
+
+      let entries: CloudEntry[];
+      try {
+        entries = (await listDirectory(dir)).entries;
+      } catch {
+        continue;
+      }
+
+      for (const e of entries) {
+        if (e.type === "directory") {
+          queue.push(normalizePath(e.path));
+          continue;
+        }
+        if (!e.isIngestible) continue;
+        documentCount += 1;
+        const size = e.size ?? 0;
+        totalSize += size;
+        if (e.size === 0) zeroByteCount += 1;
+        bumpTypeCount(byType, e.name, e.mimeType);
+      }
+    }
+
+    return {
+      documentCount,
+      totalSize,
+      zeroByteCount,
+      byType,
+      truncated,
+      dirsVisited,
+    };
+  }
+
+  /** @deprecated use countDocuments */
+  async function countPdfs(
+    rootPath: string,
+    opts?: { maxDirs?: number; onlyPending?: boolean }
+  ): Promise<{ total: number; truncated: boolean }> {
+    return countDocuments(rootPath, { maxDirs: opts?.maxDirs });
+  }
+
   async function countNewInFolder(
     folderPath: string,
     since: Date
   ): Promise<number> {
-    const entries = await listDirectory(folderPath);
+    const entries = (await listDirectory(folderPath)).entries;
     const sinceMs = since.getTime();
     return entries.filter((e) => {
-      if (e.type !== "file" || !e.isPdf || !e.lastModified) return false;
+      if (e.type !== "file" || !e.isIngestible || !e.lastModified) return false;
       return new Date(e.lastModified).getTime() > sinceMs;
     }).length;
   }
@@ -180,6 +283,8 @@ export function createUserWebDav(
     listDirectory,
     downloadFile,
     searchByName,
+    countDocuments,
+    scanDocuments,
     countPdfs,
     countNewInFolder,
     webdavUrl,

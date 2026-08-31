@@ -2,22 +2,25 @@ import { ScanJobStatus, SyncStatus } from "@prisma/client";
 import { prisma, getUserCloudCredentials } from "./db.js";
 import { createWebDavClient, ScanAbortedError, moveTempToConsume, discardTemp } from "./webdav.js";
 import { findPaperlessDocumentByChecksum } from "./paperless.js";
-
-/** 0 = unlimited. Applies to folder/all/selected/newest ceilings. */
-function scanMaxFiles(): number {
-  const n = Number(process.env.SCAN_MAX_FILES ?? "50");
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 50;
-}
+import { hasRemoteMetadataChanged, remoteMetaFromFile } from "./sync-meta.js";
+import {
+  abandonInFlightSyncFiles,
+  claimJobRunning,
+  downloadConcurrency,
+  isCancelled,
+  scanMaxFiles,
+  waitIfPaused,
+} from "./sync-job-helpers.js";
+import { runIngestPathsForJob } from "./ingest-batch.js";
+import { invalidateAfterScanJob } from "./listing-cache.js";
+import {
+  markSyncFileFailed,
+  markSyncFileFailedById,
+} from "./sync-fail.js";
 
 function stuckSyncMinutes(): number {
   const n = Number(process.env.STUCK_SYNC_MINUTES ?? "60");
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60;
-}
-
-function downloadConcurrency(): number {
-  const n = Number(process.env.WEBDAV_DOWNLOAD_CONCURRENCY ?? "2");
-  if (!Number.isFinite(n)) return 2;
-  return Math.min(4, Math.max(1, Math.floor(n)));
 }
 
 /** SHA-256 of empty content; never submit these to Paperless OCR. */
@@ -85,22 +88,7 @@ async function withRetries<T>(
 }
 
 /** Mark in-flight (not yet submitted to OCR) files as failed after cancel/stuck. */
-export async function abandonInFlightSyncFiles(
-  userId: string,
-  reason: string
-): Promise<number> {
-  const result = await prisma.syncFile.updateMany({
-    where: {
-      userId,
-      syncStatus: { in: [SyncStatus.QUEUED, SyncStatus.DOWNLOADING] },
-    },
-    data: {
-      syncStatus: SyncStatus.FAILED,
-      errorMessage: reason,
-    },
-  });
-  return result.count;
-}
+export { abandonInFlightSyncFiles } from "./sync-job-helpers.js";
 
 function hasFileChanged(
   existing: {
@@ -110,76 +98,7 @@ function hasFileChanged(
   },
   remote: { etag: string | null; lastModified: Date | null; size: number | null }
 ): boolean {
-  if (existing.etag && remote.etag && existing.etag !== remote.etag) {
-    return true;
-  }
-  if (
-    existing.lastModified &&
-    remote.lastModified &&
-    existing.lastModified.getTime() !== remote.lastModified.getTime()
-  ) {
-    return true;
-  }
-  if (
-    existing.fileSize !== null &&
-    remote.size != null &&
-    BigInt(remote.size) !== existing.fileSize
-  ) {
-    return true;
-  }
-  return false;
-}
-
-async function isCancelled(jobId: string): Promise<boolean> {
-  const job = await prisma.scanJob.findUnique({
-    where: { id: jobId },
-    select: { status: true },
-  });
-  return job?.status === ScanJobStatus.CANCELLED;
-}
-
-async function waitIfPaused(jobId: string): Promise<"ok" | "cancelled"> {
-  for (;;) {
-    const job = await prisma.scanJob.findUnique({
-      where: { id: jobId },
-      select: { status: true },
-    });
-    if (!job || job.status === ScanJobStatus.CANCELLED) return "cancelled";
-    if (job.status === ScanJobStatus.PAUSED) {
-      await new Promise((r) => setTimeout(r, 1500));
-      continue;
-    }
-    return "ok";
-  }
-}
-
-/** Claim job for work without resurrecting CANCELLED/COMPLETED/FAILED. */
-async function claimJobRunning(
-  jobId: string,
-  data: {
-    phase?: string;
-    processedFiles?: number;
-    currentFile?: string | null;
-  } = {}
-): Promise<boolean> {
-  const result = await prisma.scanJob.updateMany({
-    where: {
-      id: jobId,
-      status: {
-        in: [
-          ScanJobStatus.PENDING,
-          ScanJobStatus.PAUSED,
-          ScanJobStatus.RUNNING,
-        ],
-      },
-    },
-    data: {
-      status: ScanJobStatus.RUNNING,
-      startedAt: new Date(),
-      ...data,
-    },
-  });
-  return result.count > 0;
+  return hasRemoteMetadataChanged(existing, remote);
 }
 
 function pathUnderRoot(remotePath: string, rootPrefix: string | null): boolean {
@@ -206,6 +125,18 @@ export async function runScanJob(jobId: string): Promise<void> {
   const job = await prisma.scanJob.findUnique({ where: { id: jobId } });
   if (!job) throw new Error(`Scan job ${jobId} not found`);
   if (job.status === ScanJobStatus.CANCELLED) return;
+
+  if (job.jobType === "delta_sync" || job.jobType === "reconcile_only") {
+    const { runDeltaSyncJob } = await import("./delta-sync.js");
+    await runDeltaSyncJob(jobId);
+    return;
+  }
+
+  if (job.jobType === "ingest_paths") {
+    const { runIngestPathsJob } = await import("./ingest-batch.js");
+    await runIngestPathsJob(jobId);
+    return;
+  }
 
   if (
     job.jobType === "ingest_selected" ||
@@ -329,6 +260,9 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
 
   const client = createWebDavClient(creds.url, creds.username, creds.password);
   let paths: string[] = [];
+  let discoveredFiles: Awaited<
+    ReturnType<typeof client.listAllPdfFiles>
+  >["files"] = [];
 
   try {
     if (!payload) {
@@ -417,6 +351,7 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
           onProgress: onDiscoverProgress,
         });
         all = listed.files;
+        discoveredFiles = all;
         skippedDirCount = listed.skippedDirs.length;
         if (listed.earlyStop) {
           console.log(
@@ -430,6 +365,7 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
           onProgress: onDiscoverProgress,
         });
         all = listed.files;
+        discoveredFiles = all;
         skippedDirCount = listed.skippedDirs.length;
       }
 
@@ -491,6 +427,11 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
           currentFile: null,
         },
       });
+      await invalidateAfterScanJob(
+        userId,
+        job.selectedPaths,
+        payload.mode === "paths" ? payload.paths : [payload.rootPath]
+      );
       if (
         payload &&
         (payload.mode === "newest" || payload.mode === "all")
@@ -562,363 +503,15 @@ async function runIngestSelectedJob(jobId: string): Promise<void> {
     throw err;
   }
 
-  let processed = 0;
-  let skipped = 0;
-  let failed = 0;
-  let newFiles = 0;
-  let cancelledMid = false;
-  const sharedAbort = new AbortController();
 
-  const markCancelledLocal = () => {
-    cancelledMid = true;
-    if (!sharedAbort.signal.aborted) sharedAbort.abort();
-  };
+  const metaByPath = new Map<string, ReturnType<typeof remoteMetaFromFile>>();
+  for (const f of discoveredFiles) {
+    metaByPath.set(f.path, remoteMetaFromFile(f));
+  }
 
-  const bumpJobProgress = async () => {
-    if (await isCancelled(jobId)) return;
-    await prisma.scanJob.updateMany({
-      where: {
-        id: jobId,
-        status: { in: [ScanJobStatus.RUNNING, ScanJobStatus.PAUSED] },
-      },
-      data: {
-        processedFiles: processed,
-        skippedFiles: skipped,
-        failedFiles: failed,
-        newFiles,
-      },
-    });
-  };
-
-  const ingestOnePath = async (remotePath: string): Promise<void> => {
-    if (cancelledMid || sharedAbort.signal.aborted) return;
-
-    const pauseState = await waitIfPaused(jobId);
-    if (pauseState === "cancelled" || (await isCancelled(jobId))) {
-      markCancelledLocal();
-      return;
-    }
-
-    const fileName =
-      remotePath.split("/").filter(Boolean).pop() ?? remotePath;
-    let tempPath: string | null = null;
-
-    try {
-      await prisma.scanJob.updateMany({
-        where: {
-          id: jobId,
-          status: { in: [ScanJobStatus.RUNNING, ScanJobStatus.PAUSED] },
-        },
-        data: { phase: "downloading", currentFile: fileName },
-      });
-
-      await prisma.syncFile.upsert({
-        where: { userId_remotePath: { userId, remotePath } },
-        create: {
-          userId,
-          remotePath,
-          fileName,
-          syncStatus: SyncStatus.DOWNLOADING,
-        },
-        update: {
-          syncStatus: SyncStatus.DOWNLOADING,
-          errorMessage: null,
-        },
-      });
-
-      let downloaded: { tempPath: string; hash: string; size: number };
-      downloaded = await withRetries(
-        () =>
-          client.downloadToTemp(remotePath, { signal: sharedAbort.signal }),
-        3,
-        `download ${fileName}`
-      );
-      tempPath = downloaded.tempPath;
-      const hash = downloaded.hash;
-
-      if (cancelledMid || (await isCancelled(jobId))) {
-        await discardTemp(tempPath);
-        tempPath = null;
-        markCancelledLocal();
-        return;
-      }
-
-      if (isEmptyDownload(downloaded.size, hash)) {
-        await discardTemp(tempPath);
-        tempPath = null;
-        await prisma.syncFile.update({
-          where: { userId_remotePath: { userId, remotePath } },
-          data: {
-            contentHash: hash,
-            fileSize: BigInt(0),
-            syncStatus: SyncStatus.FAILED,
-            errorMessage: EMPTY_FILE_ERROR,
-            ocrPendingAt: null,
-          },
-        });
-        failed++;
-        processed++;
-        await bumpJobProgress();
-        return;
-      }
-
-      const duplicateByHash = await prisma.syncFile.findFirst({
-        where: {
-          contentHash: hash,
-          syncStatus: { in: [SyncStatus.OCR_DONE, SyncStatus.SKIPPED] },
-          paperlessDocumentId: { not: null },
-          NOT: { userId, remotePath },
-        },
-      });
-
-      if (duplicateByHash?.paperlessDocumentId) {
-        await discardTemp(tempPath);
-        tempPath = null;
-        if (cancelledMid || (await isCancelled(jobId))) {
-          markCancelledLocal();
-          return;
-        }
-        await prisma.syncFile.update({
-          where: { userId_remotePath: { userId, remotePath } },
-          data: {
-            contentHash: hash,
-            fileSize: BigInt(downloaded.size),
-            syncStatus: SyncStatus.SKIPPED,
-            paperlessDocumentId: duplicateByHash.paperlessDocumentId,
-            lastSyncedAt: new Date(),
-          },
-        });
-        skipped++;
-        processed++;
-        await bumpJobProgress();
-        return;
-      }
-
-      const existingPaperlessId = await findPaperlessDocumentByChecksum(hash);
-      if (existingPaperlessId) {
-        await discardTemp(tempPath);
-        tempPath = null;
-        if (cancelledMid || (await isCancelled(jobId))) {
-          markCancelledLocal();
-          return;
-        }
-        await prisma.syncFile.update({
-          where: { userId_remotePath: { userId, remotePath } },
-          data: {
-            contentHash: hash,
-            fileSize: BigInt(downloaded.size),
-            syncStatus: SyncStatus.OCR_DONE,
-            paperlessDocumentId: existingPaperlessId,
-            lastSyncedAt: new Date(),
-          },
-        });
-        skipped++;
-        processed++;
-        await bumpJobProgress();
-        return;
-      }
-
-      if (cancelledMid || (await isCancelled(jobId))) {
-        await discardTemp(tempPath);
-        tempPath = null;
-        markCancelledLocal();
-        return;
-      }
-
-      await prisma.scanJob.updateMany({
-        where: {
-          id: jobId,
-          status: { in: [ScanJobStatus.RUNNING, ScanJobStatus.PAUSED] },
-        },
-        data: { phase: "submitting", currentFile: fileName },
-      });
-
-      await prisma.syncFile.update({
-        where: { userId_remotePath: { userId, remotePath } },
-        data: { syncStatus: SyncStatus.QUEUED },
-      });
-
-      await withRetries(
-        async () => {
-          if (!tempPath) throw new Error("Temp file missing");
-          if (cancelledMid || (await isCancelled(jobId))) {
-            throw new ScanAbortedError();
-          }
-          await moveTempToConsume(tempPath, fileName);
-          tempPath = null;
-        },
-        3,
-        `submit ${fileName}`
-      );
-
-      if (cancelledMid || (await isCancelled(jobId))) {
-        markCancelledLocal();
-        return;
-      }
-
-      await prisma.syncFile.update({
-        where: { userId_remotePath: { userId, remotePath } },
-        data: {
-          contentHash: hash,
-          fileSize: BigInt(downloaded.size),
-          syncStatus: SyncStatus.OCR_PENDING,
-          ocrPendingAt: new Date(),
-          errorMessage: null,
-          lastSyncedAt: new Date(),
-        },
-      });
-
-      newFiles++;
-      processed++;
-      await bumpJobProgress();
-    } catch (err) {
-      await discardTemp(tempPath);
-      tempPath = null;
-      if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {
-        markCancelledLocal();
-        return;
-      }
-      failed++;
-      const message = err instanceof Error ? err.message : "Unknown error";
-      await prisma.syncFile.updateMany({
-        where: { userId, remotePath },
-        data: { syncStatus: SyncStatus.FAILED, errorMessage: message },
-      });
-      processed++;
-      await bumpJobProgress();
-    }
-  };
-
-  const cancelWatch = setInterval(() => {
-    void isCancelled(jobId).then((c) => {
-      if (c) markCancelledLocal();
-    });
-  }, 800);
-
-  try {
-    const conc = downloadConcurrency();
-    console.log(
-      `[ingest ${jobId}] downloading ${paths.length} files (concurrency=${conc})`
-    );
-    let next = 0;
-    const runners = Array.from(
-      { length: Math.min(conc, paths.length || 1) },
-      async () => {
-        while (next < paths.length && !cancelledMid) {
-          const idx = next++;
-          const remotePath = paths[idx]!;
-          await ingestOnePath(remotePath);
-        }
-      }
-    );
-    await Promise.allSettled(runners);
-
-    if (cancelledMid || (await isCancelled(jobId))) {
-      const abandoned = await abandonInFlightSyncFiles(
-        userId,
-        "Dibatalkan sebelum dikirim ke OCR"
-      );
-      await prisma.scanJob.updateMany({
-        where: {
-          id: jobId,
-          status: {
-            in: [
-              ScanJobStatus.RUNNING,
-              ScanJobStatus.PAUSED,
-              ScanJobStatus.CANCELLED,
-            ],
-          },
-        },
-        data: {
-          status: ScanJobStatus.CANCELLED,
-          completedAt: new Date(),
-          processedFiles: processed,
-          skippedFiles: skipped,
-          failedFiles: failed + abandoned,
-          newFiles,
-          errorMessage:
-            abandoned > 0
-              ? `Cancelled by user (${abandoned} file antre dibersihkan)`
-              : "Cancelled by user",
-          phase: "done",
-          currentFile: null,
-        },
-      });
-      return;
-    }
-
-    await prisma.user.update({
-      where: { id: userId },
-      data: { lastSyncAt: new Date() },
-    });
-
-    await prisma.scanJob.updateMany({
-      where: {
-        id: jobId,
-        status: { in: [ScanJobStatus.RUNNING, ScanJobStatus.PAUSED] },
-      },
-      data: {
-        status: ScanJobStatus.COMPLETED,
-        completedAt: new Date(),
-        processedFiles: processed,
-        skippedFiles: skipped,
-        failedFiles: failed,
-        newFiles,
-        phase: "done",
-        currentFile: null,
-      },
-    });
-
-    if (payload && (payload.mode === "newest" || payload.mode === "all")) {
-      await touchFavoriteSyncedAt(userId, payload.rootPath);
-    }
-  } catch (err) {
-    if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {
-      const abandoned = await abandonInFlightSyncFiles(
-        userId,
-        "Dibatalkan sebelum dikirim ke OCR"
-      );
-      await prisma.scanJob.updateMany({
-        where: {
-          id: jobId,
-          status: {
-            in: [
-              ScanJobStatus.RUNNING,
-              ScanJobStatus.PAUSED,
-              ScanJobStatus.CANCELLED,
-            ],
-          },
-        },
-        data: {
-          status: ScanJobStatus.CANCELLED,
-          completedAt: new Date(),
-          errorMessage:
-            abandoned > 0
-              ? `Cancelled by user (${abandoned} file antre dibersihkan)`
-              : "Cancelled by user",
-          phase: "done",
-          currentFile: null,
-        },
-      });
-      return;
-    }
-    const message = err instanceof Error ? err.message : "Ingest failed";
-    await prisma.scanJob.updateMany({
-      where: {
-        id: jobId,
-        status: { in: [ScanJobStatus.RUNNING, ScanJobStatus.PAUSED] },
-      },
-      data: {
-        status: ScanJobStatus.FAILED,
-        errorMessage: message,
-        completedAt: new Date(),
-        phase: "done",
-        currentFile: null,
-      },
-    });
-    throw err;
-  } finally {
-    clearInterval(cancelWatch);
+  await runIngestPathsForJob(jobId, userId, client, paths, metaByPath);
+  if (payload && (payload.mode === "newest" || payload.mode === "all")) {
+    await touchFavoriteSyncedAt(userId, payload.rootPath);
   }
 }
 
@@ -1081,6 +674,7 @@ async function runFullScanJob(jobId: string): Promise<void> {
               syncStatus: SyncStatus.FAILED,
               errorMessage: EMPTY_FILE_ERROR,
               ocrPendingAt: null,
+              ingestRetryCount: { increment: 1 },
             },
           });
           failed++;
@@ -1146,6 +740,7 @@ async function runFullScanJob(jobId: string): Promise<void> {
               syncStatus: SyncStatus.FAILED,
               errorMessage: EMPTY_FILE_ERROR,
               ocrPendingAt: null,
+              ingestRetryCount: { increment: 1 },
             },
           });
           failed++;
@@ -1252,10 +847,7 @@ async function runFullScanJob(jobId: string): Promise<void> {
         }
         failed++;
         const message = err instanceof Error ? err.message : "Unknown error";
-        await prisma.syncFile.updateMany({
-          where: { userId, remotePath: remote.path },
-          data: { syncStatus: SyncStatus.FAILED, errorMessage: message },
-        });
+        await markSyncFileFailed(userId, remote.path, message);
         await prisma.scanJob.update({
           where: { id: jobId },
           data: { processedFiles: ++processed, failedFiles: failed },
@@ -1282,6 +874,11 @@ async function runFullScanJob(jobId: string): Promise<void> {
         newFiles,
       },
     });
+    await invalidateAfterScanJob(
+      userId,
+      job.selectedPaths,
+      remoteFiles.map((f) => f.path)
+    );
   } catch (err) {
     if (err instanceof ScanAbortedError || (await isCancelled(jobId))) {
       await prisma.scanJob.update({
@@ -1342,14 +939,7 @@ export async function reconcileOcrStatus(): Promise<{
       isEmptyRemoteSize(file.fileSize) ||
       file.contentHash === EMPTY_CONTENT_HASH
     ) {
-      await prisma.syncFile.update({
-        where: { id: file.id },
-        data: {
-          syncStatus: SyncStatus.FAILED,
-          errorMessage: EMPTY_FILE_ERROR,
-          ocrPendingAt: null,
-        },
-      });
+      await markSyncFileFailedById(file.id, EMPTY_FILE_ERROR);
       // Counted as failed empty stub, not OCR timeout
       continue;
     }
@@ -1373,13 +963,10 @@ export async function reconcileOcrStatus(): Promise<{
     }
 
     if (pendingSince < cutoff) {
-      await prisma.syncFile.update({
-        where: { id: file.id },
-        data: {
-          syncStatus: SyncStatus.FAILED,
-          errorMessage: `OCR timeout setelah ${OCR_TIMEOUT_MIN} menit. Dokumen belum muncul di Paperless. Coba OCR lagi.`,
-        },
-      });
+      await markSyncFileFailedById(
+        file.id,
+        `OCR timeout setelah ${OCR_TIMEOUT_MIN} menit. Dokumen belum muncul di Paperless. Coba OCR lagi.`
+      );
       timedOut++;
     }
   }
@@ -1416,6 +1003,7 @@ export async function sweepStuckInFlightFiles(): Promise<number> {
     data: {
       syncStatus: SyncStatus.FAILED,
       errorMessage: `Macet lebih dari ${mins} menit tanpa scan aktif. Aman untuk Coba OCR lagi.`,
+      ingestRetryCount: { increment: 1 },
     },
   });
 

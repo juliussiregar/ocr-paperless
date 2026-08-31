@@ -17,6 +17,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { humanizeFileName } from "@/lib/display-name";
+import { formatSize } from "@/lib/format-size";
 import { cn } from "@/lib/utils";
 
 type NodeKind = "directory" | "file";
@@ -27,6 +28,7 @@ type TreeNode = {
   kind: NodeKind;
   isPdf?: boolean;
   paperlessDocumentId?: number | null;
+  sizeBytes?: number | null;
   children?: TreeNode[];
   loaded?: boolean;
   loading?: boolean;
@@ -182,6 +184,7 @@ export function FolderTreeSidebar({
             type?: string;
             isPdf?: boolean;
             paperlessDocumentId?: number | null;
+            sizeBytes?: number | null;
           };
 
           const rawEntries: RawEntry[] =
@@ -204,6 +207,8 @@ export function FolderTreeSidebar({
               kind,
               isPdf: Boolean(e.isPdf),
               paperlessDocumentId: e.paperlessDocumentId ?? null,
+              sizeBytes:
+                typeof e.sizeBytes === "number" ? e.sizeBytes : null,
               children: kind === "directory" ? [] : undefined,
               loaded: kind === "file" ? true : false,
             };
@@ -245,9 +250,8 @@ export function FolderTreeSidebar({
       for (let i = 0; i < ancestors.length; i++) {
         if (gen !== ensureGenRef.current) return;
         const a = ancestors[i];
-        const isLeaf = i === ancestors.length - 1;
-        // Always refresh the open folder so tree matches the right panel
-        await loadChildren(a, isLeaf);
+        // Tree shares Redis listing cache with browse; no forced WebDAV refresh
+        await loadChildren(a, false);
       }
       if (gen !== ensureGenRef.current) return;
 
@@ -520,6 +524,14 @@ function TreeRows({
                   />
                 )}
                 <span className="whitespace-nowrap">{label}</span>
+                {node.sizeBytes != null && node.sizeBytes > 0 && (
+                  <span
+                    className="ml-1 shrink-0 text-[10px] tabular-nums text-[var(--auth-ink)]/35"
+                    title="Ukuran folder"
+                  >
+                    {formatSize(node.sizeBytes)}
+                  </span>
+                )}
               </button>
             </div>
             {isOpen && childCount > 0 && (

@@ -79,6 +79,23 @@ export function buildFolderStatsMap(
   return map;
 }
 
+/** Prisma filter: sync files under immediate child folders only (not whole browse tree). */
+export function nestedSyncFileFilter(
+  userId: string,
+  dirPaths: string[]
+): {
+  userId: string;
+  OR: Array<{ remotePath: { startsWith: string } }>;
+} | null {
+  if (dirPaths.length === 0) return null;
+  return {
+    userId,
+    OR: dirPaths.map((d) => ({
+      remotePath: { startsWith: `${normalizeBrowsePath(d)}/` },
+    })),
+  };
+}
+
 function resolveImmediateChildFolder(
   remotePath: string,
   parentPath: string,

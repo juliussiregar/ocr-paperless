@@ -10,7 +10,10 @@ export default async function SearchPage() {
   const userId = session.user.id;
 
   const documentCount = await prisma.syncFile.count({
-    where: { userId, syncStatus: SyncStatus.OCR_DONE },
+    where: {
+      userId,
+      syncStatus: { in: [SyncStatus.OCR_DONE, SyncStatus.SKIPPED] },
+    },
   });
 
   return (

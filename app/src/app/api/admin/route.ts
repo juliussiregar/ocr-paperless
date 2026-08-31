@@ -7,7 +7,7 @@ import bcrypt from "bcryptjs";
 import { Role } from "@prisma/client";
 import {
   getAutoScanSettings,
-  setAutoScanEnabled,
+  updateAutoScanSettings,
 } from "@/lib/app-settings";
 
 export async function GET() {
@@ -41,18 +41,82 @@ export async function POST(request: NextRequest) {
   const { action } = body;
 
   if (action === "updateSettings") {
-    if (typeof body.autoScanEnabled !== "boolean") {
-      return NextResponse.json(
-        { error: "autoScanEnabled harus boolean" },
-        { status: 400 }
-      );
+    const patch: {
+      autoScanEnabled?: boolean;
+      autoScanReady?: boolean;
+      autoScanIntervalMinutes?: number;
+      autoScanBatchSize?: number;
+      autoScanRootPath?: string;
+      autoScanSubtrees?: string;
+      autoRetryEnabled?: boolean;
+      autoRetryIntervalMinutes?: number;
+      autoRetryBatchSize?: number;
+    } = {};
+
+    if (typeof body.autoScanEnabled === "boolean") {
+      patch.autoScanEnabled = body.autoScanEnabled;
     }
-    await setAutoScanEnabled(body.autoScanEnabled);
+    if (typeof body.autoScanReady === "boolean") {
+      patch.autoScanReady = body.autoScanReady;
+    }
+    if (body.autoScanIntervalMinutes != null) {
+      const n = Number(body.autoScanIntervalMinutes);
+      if (!Number.isFinite(n) || n < 5) {
+        return NextResponse.json(
+          { error: "Interval minimal 5 menit" },
+          { status: 400 }
+        );
+      }
+      patch.autoScanIntervalMinutes = Math.floor(n);
+    }
+    if (body.autoScanBatchSize != null) {
+      const n = Number(body.autoScanBatchSize);
+      if (!Number.isFinite(n) || n < 1) {
+        return NextResponse.json(
+          { error: "Batch minimal 1 file" },
+          { status: 400 }
+        );
+      }
+      patch.autoScanBatchSize = Math.floor(n);
+    }
+    if (typeof body.autoScanRootPath === "string") {
+      patch.autoScanRootPath = body.autoScanRootPath.trim() || "/";
+    }
+    if (typeof body.autoScanSubtrees === "string") {
+      patch.autoScanSubtrees = body.autoScanSubtrees;
+    }
+    if (typeof body.autoRetryEnabled === "boolean") {
+      patch.autoRetryEnabled = body.autoRetryEnabled;
+    }
+    if (body.autoRetryIntervalMinutes != null) {
+      const n = Number(body.autoRetryIntervalMinutes);
+      if (!Number.isFinite(n) || n < 15) {
+        return NextResponse.json(
+          { error: "Interval retry minimal 15 menit" },
+          { status: 400 }
+        );
+      }
+      patch.autoRetryIntervalMinutes = Math.floor(n);
+    }
+    if (body.autoRetryBatchSize != null) {
+      const n = Number(body.autoRetryBatchSize);
+      if (!Number.isFinite(n) || n < 1) {
+        return NextResponse.json(
+          { error: "Batch retry minimal 1 file" },
+          { status: 400 }
+        );
+      }
+      patch.autoRetryBatchSize = Math.floor(n);
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return NextResponse.json({ error: "Tidak ada perubahan" }, { status: 400 });
+    }
+
+    const settings = await updateAutoScanSettings(patch);
     await writeAudit("settings.auto_scan", session!.user.id, {
-      autoScanEnabled: body.autoScanEnabled,
-      intervalMinutes: 60,
+      ...patch,
     });
-    const settings = await getAutoScanSettings();
     return NextResponse.json({ settings });
   }
 

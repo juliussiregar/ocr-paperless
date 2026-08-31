@@ -5,15 +5,17 @@
 | File | Keterangan |
 |------|------------|
 | **`DocSearch-Dokumentasi-Aplikasi.pdf`** | Dokumentasi A4 lengkap (bukan slide): konteks, Paperless mendalam, arsitektur, DB, alur teknis ber-flowchart, modul halaman, keamanan, OpenAI & biaya, operasional, FAQ |
+| **`DocSearch-Dokumentasi-AI.pdf`** | Dokumentasi AI fokus: konsep RAG, Search vs Ask AI, komponen RAG sekarang, batasan, kemungkinan pertanyaan demo/pelatihan, arah pengembangan, teknik RAG ke depan, model sekarang vs rekomendasi |
 
 Generate ulang:
 
 ```bash
 pip3 install reportlab
 python3 docs/presentation/generate_docs_pdf.py
+python3 docs/presentation/generate_ai_pdf.py
 ```
 
-Script sumber: `generate_docs_pdf.py` (helper flowchart `FlowBox` / `ArrowDown` / `HFlow`, callout, tabel).
+Script sumber: `generate_docs_pdf.py` (dokumentasi aplikasi), `generate_ai_pdf.py` (dokumentasi AI). Helper flowchart: `FlowBox` / `ArrowDown` / `HFlow`, callout, tabel.
 
 ## Isi dokumen (bab)
 

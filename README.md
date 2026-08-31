@@ -26,7 +26,14 @@ Contoh VPS **arteloka** (sudah ada app di `:3001`, Postgres di `:5432`):
 | Paperless admin | `127.0.0.1:8000` |
 
 Project Compose bernama `docsearch` (container/volume terpisah dari `arteloka-*`).  
-RAM ~4GB: Paperless dibatasi ~1.5GB, worker OCR = 1, batch scan default 20. **Disarankan swap 2G.**
+RAM **8GB+** disarankan (Paperless ~2GB, sync-worker ~1GB, app ~768MB, Redis 256MB).
+
+Checklist deploy lengkap: [docs/deploy.md](docs/deploy.md)
+
+```bash
+npm run pre-deploy          # lokal: tsc + worker build
+./scripts/server-up.sh      # server: build + up
+```
 
 ### 1. Prasyarat
 
@@ -107,6 +114,20 @@ Salin token Paperless ke root `.env` (`PAPERLESS_API_TOKEN`) dan `app/.env.local
 ```bash
 docker compose up -d --force-recreate sync-worker
 ```
+
+---
+
+## Integrasi WhatsApp
+
+API terbuka untuk service WhatsApp: [docs/whatsapp-integration.md](docs/whatsapp-integration.md)
+
+## Auto scan
+
+Roadmap dan cara aktivasi: [docs/auto-scan-phases.md](docs/auto-scan-phases.md)
+
+## Deploy checklist
+
+Langkah verifikasi production: [docs/deploy.md](docs/deploy.md)
 
 ---
 

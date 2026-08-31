@@ -47,6 +47,7 @@ export type SyncStage =
   | "OCR_DONE"
   | "SKIPPED"
   | "FAILED"
+  | "DELETED"
   | null;
 
 /** Human-readable stage for a single file (ID). */
@@ -64,6 +65,8 @@ export function syncStageLabel(stage: string | null | undefined): string {
       return "Sudah ada (duplikat)";
     case "FAILED":
       return "Gagal";
+    case "DELETED":
+      return "Dihapus dari cloud";
     case "DISCOVERED":
       return "Belum diambil";
     default:
@@ -103,6 +106,7 @@ export function mapSyncStatusToUi(
   }
   if (syncStatus === "OCR_DONE" || syncStatus === "SKIPPED") return "done";
   if (syncStatus === "FAILED") return "failed";
+  if (syncStatus === "DELETED") return "not_ingested";
   return "not_ingested";
 }
 
