@@ -31,7 +31,7 @@ remote_deploy() {
   append_env_if_missing PAPERLESS_CONSUMER_POLLING 5
   append_env_if_missing OCR_RECONCILE_INTERVAL_MS 10000
   append_env_if_missing COMPOSE_PROFILES prod
-  append_env_if_missing SCAN_MAX_FILES 150
+  append_env_if_missing SCAN_MAX_FILES 0
   append_env_if_missing SCAN_DISCOVER_CONCURRENCY 6
   append_env_if_missing SCAN_INGEST_CONCURRENCY 6
   append_env_if_missing WEBDAV_DISCOVERY_CONCURRENCY 32

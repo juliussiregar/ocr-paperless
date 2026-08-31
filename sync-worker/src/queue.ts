@@ -115,9 +115,8 @@ export async function maybeAutoScan(): Promise<void> {
 
       enqueued++;
       console.log(
-        `[auto-scan] ${user.email} delta ${rootPath} batch=${batch} → ${job.id}`
+        `[auto-scan] ${user.email} delta ${rootPath} limit=${batch === 0 ? "all" : batch} → ${job.id}`
       );
-      break;
     } catch (err) {
       console.error(`[auto-scan] user ${user.id}:`, err);
     }

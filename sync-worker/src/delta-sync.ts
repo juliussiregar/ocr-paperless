@@ -12,7 +12,6 @@ import {
   abandonInFlightSyncFiles,
   claimJobRunning,
   isCancelled,
-  scanMaxFiles,
   waitIfPaused,
 } from "./sync-job-helpers.js";
 import {
@@ -21,6 +20,11 @@ import {
 } from "./ingest-batch.js";
 import { enqueueScanJob } from "./scan-queues.js";
 import { invalidateAfterScanJob } from "./listing-cache.js";
+import {
+  effectiveIngestLimit,
+  isUnlimitedSyncBatch,
+  SYNC_NO_LIMIT,
+} from "./sync-defaults.js";
 import {
   loadFolderSnapshots,
   shouldSkipFolderListing,
@@ -96,9 +100,16 @@ export function parseDeltaSyncPayload(raw: string | null): DeltaSyncPayload | nu
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const rootPath =
       typeof parsed.rootPath === "string" ? parsed.rootPath : "/";
-    const limit = Math.max(0, Number(parsed.limit) || scanMaxFiles() || 50);
-    const reconcileOnly = parsed.reconcileOnly === true || limit === 0;
-    return { rootPath, limit: reconcileOnly ? 0 : limit, reconcileOnly };
+    const reconcileOnly = parsed.reconcileOnly === true;
+    if (reconcileOnly) {
+      return { rootPath, limit: 0, reconcileOnly: true };
+    }
+    const explicit =
+      parsed.limit != null && parsed.limit !== ""
+        ? Number(parsed.limit)
+        : undefined;
+    const limit = effectiveIngestLimit(explicit);
+    return { rootPath, limit, reconcileOnly: false };
   } catch {
     return null;
   }
@@ -162,9 +173,8 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
   const rootPrefix = normalizeRootPath(payload.rootPath);
   const now = new Date();
 
-  const ingestLimit = payload.reconcileOnly
-    ? 0
-    : Math.min(payload.limit, scanMaxFiles() || payload.limit);
+  const ingestLimit = payload.reconcileOnly ? 0 : payload.limit;
+  const fullDiscover = isUnlimitedSyncBatch() || ingestLimit >= SYNC_NO_LIMIT / 2;
 
   try {
     await prisma.scanJob.update({
@@ -182,12 +192,14 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
     const listed = await client.listAllPdfFiles({
       rootPath: payload.rootPath,
       shouldAbort: discoveryGate,
-      shouldSkipDir: (dirPath, dirLm, dirEtag) =>
-        shouldSkipFolderListing(
-          folderSnapshots.get(dirPath),
-          dirLm,
-          dirEtag
-        ),
+      shouldSkipDir: fullDiscover
+        ? () => false
+        : (dirPath, dirLm, dirEtag) =>
+            shouldSkipFolderListing(
+              folderSnapshots.get(dirPath),
+              dirLm,
+              dirEtag
+            ),
       onDirListed: async (dirPath, dirLm, dirEtag) => {
         await upsertFolderSnapshot(userId, dirPath, dirLm, dirEtag);
         folderSnapshots.set(dirPath, {
@@ -342,7 +354,10 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
       });
     }
 
-    const cappedIngest = pathsToIngest.slice(0, ingestLimit);
+    const cappedIngest =
+      ingestLimit >= SYNC_NO_LIMIT / 2
+        ? pathsToIngest
+        : pathsToIngest.slice(0, ingestLimit);
 
     console.log(
       `[delta ${jobId}] cloud=${cloudFiles.length} ingest=${cappedIngest.length}/${pathsToIngest.length} moved=${moved} unchanged=${unchanged} deleted=${existingRows.length - seenIds.size}`
@@ -372,8 +387,8 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
           skippedFiles: unchanged,
           phase: "done",
           errorMessage:
-            pathsToIngest.length > ingestLimit && ingestLimit > 0
-              ? `${pathsToIngest.length - ingestLimit} file menunggu batch berikutnya`
+            pathsToIngest.length > cappedIngest.length && ingestLimit < SYNC_NO_LIMIT / 2
+              ? `${pathsToIngest.length - cappedIngest.length} file menunggu batch berikutnya`
               : payload.reconcileOnly
                 ? "Reconcile selesai (tanpa ingest)"
                 : null,
@@ -411,8 +426,8 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
         phase: "done",
         currentFile: null,
         errorMessage:
-          pathsToIngest.length > ingestLimit
-            ? `${pathsToIngest.length - ingestLimit} file menunggu; ingest ${ingestJob.id}`
+          pathsToIngest.length > cappedIngest.length && ingestLimit < SYNC_NO_LIMIT / 2
+            ? `${pathsToIngest.length - cappedIngest.length} file menunggu; ingest ${ingestJob.id}`
             : `Ingest antrian: ${ingestJob.id}`,
       },
     });

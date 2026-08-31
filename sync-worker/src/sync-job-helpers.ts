@@ -1,11 +1,15 @@
 import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { markSyncFilesFailedInFlight } from "./sync-fail.js";
+import { effectiveIngestLimit, syncBatchSize } from "./sync-defaults.js";
 
 /** 0 = unlimited. Applies to folder/all/selected/newest ceilings. */
 export function scanMaxFiles(): number {
-  const n = Number(process.env.SCAN_MAX_FILES ?? "100");
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 100;
+  return syncBatchSize();
+}
+
+export function ingestCap(explicit?: number | null): number {
+  return effectiveIngestLimit(explicit);
 }
 
 export function downloadConcurrency(): number {

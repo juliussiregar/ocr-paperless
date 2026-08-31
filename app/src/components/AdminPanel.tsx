@@ -415,7 +415,11 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
               Throughput aktif (env worker / app)
             </p>
             <p className="mt-1 tabular-nums">
-              batch {scanHealth.throughput.scanMaxFiles} · discover{" "}
+              batch{" "}
+              {scanHealth.throughput.scanMaxFiles === 0
+                ? "tanpa batas"
+                : scanHealth.throughput.scanMaxFiles}{" "}
+              · discover{" "}
               {scanHealth.throughput.discoverConcurrency} · ingest{" "}
               {scanHealth.throughput.ingestConcurrency} · webdav list{" "}
               {scanHealth.throughput.webdavDiscoveryConcurrency} · download{" "}
@@ -698,9 +702,9 @@ export function AdminPanel({ initialSettings }: AdminPanelProps) {
                 Sync otomatis
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                Aktifkan: sync semua user sekarang, lalu ulang sesuai interval.
-                Matikan: hentikan jadwal, batalkan job aktif, dan bersihkan
-                antrean (file OCR yang sudah dikirim tetap diproses).
+                Aktifkan: sync semua user sekarang (tanpa batas batch), lalu
+                ulang sesuai interval. Matikan: hentikan jadwal, batalkan job
+                aktif, bersihkan antrean.
               </p>
             </div>
             <button

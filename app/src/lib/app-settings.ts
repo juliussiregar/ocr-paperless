@@ -3,7 +3,7 @@ import {
   AUTO_RETRY_BATCH_SIZE,
   AUTO_RETRY_INTERVAL_MINUTES,
   SYNC_ROOT_PATH,
-  syncBatchSize,
+  syncLimitForJobPayload,
 } from "@/lib/sync-defaults";
 
 export const SETTING_AUTO_SCAN_ENABLED = "auto_scan_enabled";
@@ -25,7 +25,7 @@ export type AutoScanSettings = {
 
 /** Write internal defaults used by worker (hidden from Admin UI). */
 export async function applySyncOperationalDefaults(): Promise<void> {
-  const batch = syncBatchSize();
+  const batch = syncLimitForJobPayload();
   const ops: Array<{ key: string; value: string }> = [
     { key: SETTING_AUTO_SCAN_READY, value: "true" },
     { key: SETTING_AUTO_SCAN_BATCH_SIZE, value: String(batch) },

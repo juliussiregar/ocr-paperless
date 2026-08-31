@@ -19,7 +19,8 @@ export async function abandonInFlightSyncFiles(
   return result.count;
 }
 
+import { syncBatchSize } from "@/lib/sync-defaults";
+
 export function scanMaxFilesFromEnv(): number {
-  const n = Number(process.env.SCAN_MAX_FILES ?? "100");
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 100;
+  return syncBatchSize();
 }

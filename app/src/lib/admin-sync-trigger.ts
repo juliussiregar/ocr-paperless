@@ -4,7 +4,7 @@ import { enqueueScanJob } from "@/lib/queue";
 import { writeAudit } from "@/lib/audit";
 import { activeScanJobWhere } from "@/lib/scan-status";
 import { listUsersWithBappenasCreds } from "@/lib/bappenas";
-import { SYNC_ROOT_PATH, syncBatchSize } from "@/lib/sync-defaults";
+import { SYNC_ROOT_PATH, syncLimitForJobPayload } from "@/lib/sync-defaults";
 
 export type TriggerAllSyncResult = {
   enqueued: Array<{ userId: string; email: string; jobId: string }>;
@@ -20,10 +20,7 @@ export async function triggerDeltaSyncForAllUsers(
 ): Promise<TriggerAllSyncResult> {
   const rootPath =
     options?.rootPath?.trim() ? options.rootPath.trim() : SYNC_ROOT_PATH;
-  const limit = Math.max(
-    1,
-    Math.min(500, options?.limit ?? syncBatchSize())
-  );
+  const limit = options?.limit ?? syncLimitForJobPayload();
 
   const users = await listUsersWithBappenasCreds();
   if (users.length === 0) {
