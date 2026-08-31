@@ -136,6 +136,19 @@ function formatDurationMs(ms: number | null | undefined): string {
   return rem > 0 ? `${min}m ${rem}s` : `${min}m`;
 }
 
+function jobTypeLabel(jobType: string): string {
+  switch (jobType) {
+    case "delta_sync":
+      return "Sync cloud";
+    case "reconcile_only":
+      return "Cek status OCR";
+    case "ingest_paths":
+      return "Unduh file";
+    default:
+      return jobType;
+  }
+}
+
 function ProgressTrack({
   label,
   current,
@@ -341,8 +354,8 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
     }
   }
 
-  async function triggerDelta(userId: string, reconcileOnly = false) {
-    setTriggeringUserId(userId);
+  async function triggerSync(userId: string, reconcileOnly = false) {
+    setTriggeringUserId(reconcileOnly ? `${userId}:cek` : userId);
     try {
       const res = await fetch("/api/admin/scan", {
         method: "POST",
@@ -351,13 +364,40 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
       });
       const data = await res.json();
       if (!res.ok) {
-        showMsg(data.error ?? "Gagal trigger scan", "error");
+        showMsg(data.error ?? "Gagal memulai sync", "error");
         return;
       }
       showMsg(
         reconcileOnly
-          ? `Reconcile job ${data.jobId} dibuat`
-          : `Delta sync job ${data.jobId} dibuat`
+          ? `Cek status OCR dimulai (job ${data.jobId})`
+          : `Sync cloud dimulai (job ${data.jobId})`
+      );
+      void pollLive();
+    } finally {
+      setTriggeringUserId(null);
+    }
+  }
+
+  async function triggerAllSync(reconcileOnly = false) {
+    const key = reconcileOnly ? "all-cek" : "all-sync";
+    setTriggeringUserId(key);
+    try {
+      const res = await fetch("/api/admin/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "triggerAll", reconcileOnly }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showMsg(data.error ?? "Gagal memulai sync semua user", "error");
+        return;
+      }
+      const n = data.enqueued?.length ?? 0;
+      const skipped = data.skippedActive?.length ?? 0;
+      showMsg(
+        reconcileOnly
+          ? `Cek status OCR: ${n} user job dibuat${skipped > 0 ? `, ${skipped} dilewati (job aktif)` : ""}`
+          : `Sync cloud: ${n} user job dibuat${skipped > 0 ? `, ${skipped} dilewati (job aktif)` : ""}`
       );
       void pollLive();
     } finally {
@@ -658,7 +698,7 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                 className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
               >
                 <RotateCcw size={14} />
-                Retry semua failed
+                Retry semua gagal
               </button>
             </div>
           </div>
@@ -858,10 +898,34 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
 
       <Card className="!p-0 overflow-hidden">
         <div className="border-b border-slate-100 px-6 py-4">
-          <h2 className="section-title">Status per user</h2>
-          <p className="mt-1 text-xs text-slate-500">
-            Trigger delta atau reconcile manual. Data live tanpa refresh.
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="section-title">Status per user</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                <strong>Sync cloud</strong>: scan folder + unduh file baru atau
+                berubah. <strong>Cek status OCR</strong>: perbarui status OCR
+                yang sudah ada, tanpa unduh file baru.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={triggeringUserId !== null}
+                onClick={() => void triggerAllSync(false)}
+                className="rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-medium text-teal-800 hover:bg-teal-100 disabled:opacity-50"
+              >
+                Sync semua user
+              </button>
+              <button
+                type="button"
+                disabled={triggeringUserId !== null}
+                onClick={() => void triggerAllSync(true)}
+                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+              >
+                Cek status semua
+              </button>
+            </div>
+          </div>
         </div>
         <div className="overflow-x-auto p-4">
           <table className="w-full text-left text-xs">
@@ -931,24 +995,24 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                       <button
                         type="button"
                         disabled={
-                          triggeringUserId === row.userId ||
+                          triggeringUserId !== null ||
                           row.activeJob != null
                         }
-                        onClick={() => void triggerDelta(row.userId)}
+                        onClick={() => void triggerSync(row.userId)}
                         className="rounded border border-teal-200 px-2 py-1 text-teal-700 hover:bg-teal-50 disabled:opacity-50"
                       >
-                        Delta
+                        Sync cloud
                       </button>
                       <button
                         type="button"
                         disabled={
-                          triggeringUserId === row.userId ||
+                          triggeringUserId !== null ||
                           row.activeJob != null
                         }
-                        onClick={() => void triggerDelta(row.userId, true)}
+                        onClick={() => void triggerSync(row.userId, true)}
                         className="rounded border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                       >
-                        Reconcile
+                        Cek status OCR
                       </button>
                       <button
                         type="button"
@@ -960,7 +1024,7 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                         onClick={() => void retryFailed(row.userId)}
                         className="rounded border border-amber-200 px-2 py-1 text-amber-800 hover:bg-amber-50 disabled:opacity-50"
                       >
-                        Retry failed
+                        Ulang gagal
                       </button>
                     </div>
                   </td>
@@ -1009,7 +1073,7 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
                   </td>
                   <td className="py-2 pr-3">{job.user?.email ?? "-"}</td>
                   <td className="py-2 pr-3 font-mono text-[11px] text-slate-700">
-                    {job.jobType}
+                    {jobTypeLabel(job.jobType)}
                   </td>
                   <td className="py-2 pr-3">
                     <span

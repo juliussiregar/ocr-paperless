@@ -254,6 +254,7 @@ export async function POST(request: NextRequest) {
       typeof body.rootPath === "string" && body.rootPath.trim()
         ? body.rootPath.trim()
         : SYNC_ROOT_PATH;
+    const reconcileOnly = body.reconcileOnly === true;
     const limit = Math.max(
       1,
       Math.min(500, Number(body.limit) || syncBatchSize())
@@ -263,6 +264,7 @@ export async function POST(request: NextRequest) {
       const result = await triggerDeltaSyncForAllUsers(session!.user.id, {
         rootPath,
         limit,
+        reconcileOnly,
       });
       return NextResponse.json({ ok: true, ...result });
     } catch (err) {

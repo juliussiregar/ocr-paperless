@@ -28,6 +28,8 @@ function phaseLabel(phase: string | null, jobType: string, status: string): stri
   if (phase === "done" || status === "COMPLETED") return "Selesai";
   if (status === "FAILED") return "Gagal";
   if (status === "CANCELLED") return "Dibatalkan";
+  if (jobType === "reconcile_only") return "Cek status OCR";
+  if (jobType === "delta_sync") return "Sync cloud";
   return phase ?? status;
 }
 

@@ -16,11 +16,12 @@ export type TriggerAllSyncResult = {
 
 export async function triggerDeltaSyncForAllUsers(
   adminUserId: string,
-  options?: { rootPath?: string; limit?: number }
+  options?: { rootPath?: string; limit?: number; reconcileOnly?: boolean }
 ): Promise<TriggerAllSyncResult> {
   const rootPath =
     options?.rootPath?.trim() ? options.rootPath.trim() : SYNC_ROOT_PATH;
-  const limit = options?.limit ?? syncLimitForJobPayload();
+  const reconcileOnly = options?.reconcileOnly === true;
+  const limit = reconcileOnly ? 0 : (options?.limit ?? syncLimitForJobPayload());
 
   const users = await listUsersWithBappenasCreds();
   if (users.length === 0) {
@@ -48,8 +49,12 @@ export async function triggerDeltaSyncForAllUsers(
       data: {
         status: ScanJobStatus.PENDING,
         triggeredById: user.id,
-        jobType: "delta_sync",
-        selectedPaths: JSON.stringify({ rootPath, limit }),
+        jobType: reconcileOnly ? "reconcile_only" : "delta_sync",
+        selectedPaths: JSON.stringify({
+          rootPath,
+          limit,
+          reconcileOnly,
+        }),
       },
     });
 
@@ -60,6 +65,7 @@ export async function triggerDeltaSyncForAllUsers(
   await writeAudit("admin.scan.trigger_all", adminUserId, {
     rootPath,
     limit,
+    reconcileOnly,
     enqueuedCount: enqueued.length,
     skippedActiveCount: skippedActive.length,
     totalWithCreds: users.length,
