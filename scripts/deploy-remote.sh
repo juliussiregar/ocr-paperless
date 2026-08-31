@@ -37,8 +37,14 @@ remote_deploy() {
     fi
   }
 
-  echo "==> apply tier max defaults (8GB VPS)"
+  echo "==> apply tier max defaults (8GB VPS) + missing env keys"
   append_env_if_missing COMPOSE_PROFILES prod
+  append_env_if_missing POSTGRES_HOST_PORT 5434
+  append_env_if_missing REDIS_HOST_PORT 6380
+  append_env_if_missing PAPERLESS_HOST_PORT 8000
+  append_env_if_missing PAPERLESS_WEBSERVER_WORKERS 2
+  append_env_if_missing BAPPENAS_URL https://cloud.bappenas.go.id
+  append_env_if_missing INGEST_AUTO_RETRY_MAX 1
 
   upsert_env POSTGRES_MEM_LIMIT 1536m
   upsert_env REDIS_MEM_LIMIT 512m
