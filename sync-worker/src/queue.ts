@@ -17,6 +17,7 @@ import {
 } from "./scan-queues.js";
 import { maybeAutoRetryFailed } from "./retry-failed.js";
 import { userInWorkerShard } from "./worker-shard.js";
+import { isHeavySyncActive } from "./sync-busy.js";
 import {
   AUTO_RETRY_BATCH_SIZE,
   AUTO_RETRY_INTERVAL_MINUTES,
@@ -212,6 +213,9 @@ export function startBackgroundTasks(): void {
   intervals.push(
     setInterval(async () => {
       try {
+        if (await isHeavySyncActive()) {
+          return;
+        }
         const { done, timedOut } = await reconcileOcrStatus();
         if (done || timedOut) {
           console.log(`[reconcile] done=${done} timedOut=${timedOut}`);
@@ -256,6 +260,10 @@ export function startBackgroundTasks(): void {
   intervals.push(
     setInterval(async () => {
       try {
+        if (await isHeavySyncActive()) {
+          // Cut DB load during discover/ingest; OCR will catch up after.
+          return;
+        }
         await reconcileOcrStatus();
         const swept = await sweepStuckInFlightFiles();
         if (swept > 0) {

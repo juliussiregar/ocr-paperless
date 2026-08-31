@@ -1,8 +1,8 @@
 import { createHash } from "crypto";
-import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { getPaperlessDocumentContent } from "./paperless.js";
 import { recordDocumentEmbedUsage } from "./embed-audit.js";
+import { isHeavySyncActive } from "./sync-busy.js";
 
 const CHUNK_SIZE = envChunkSize();
 const CHUNK_OVERLAP = envChunkOverlap();
@@ -14,26 +14,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function pauseEmbedDuringIngest(): boolean {
+function pauseEmbedDuringSync(): boolean {
   return (process.env.EMBED_PAUSE_DURING_INGEST ?? "true") !== "false";
-}
-
-/** Skip backfill while bulk ingest is running (reduces OpenAI 429 + DB load). */
-async function isBulkIngestActive(): Promise<boolean> {
-  if (!pauseEmbedDuringIngest()) return false;
-  const n = await prisma.scanJob.count({
-    where: {
-      jobType: "ingest_paths",
-      status: {
-        in: [
-          ScanJobStatus.PENDING,
-          ScanJobStatus.RUNNING,
-          ScanJobStatus.PAUSED,
-        ],
-      },
-    },
-  });
-  return n > 0;
 }
 
 function envChunkSize(): number {
@@ -296,7 +278,7 @@ export async function indexDocumentChunks(opts: {
 /** Backfill embeddings for OCR_DONE/SKIPPED files missing this user's chunks. */
 export async function backfillDocumentEmbeddings(): Promise<number> {
   if (!isConfigured()) return 0;
-  if (await isBulkIngestActive()) return 0;
+  if (pauseEmbedDuringSync() && (await isHeavySyncActive())) return 0;
 
   const done = await prisma.syncFile.findMany({
     where: {

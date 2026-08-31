@@ -1,10 +1,11 @@
-import { prisma } from "./db.js";
-import { parseWebDavDate } from "./webdav-dates.js";
 import { connection } from "./scan-queues.js";
 import {
   createWebDavClient,
   type DirectoryListing,
 } from "./webdav.js";
+import { upsertFolderSnapshot } from "./folder-cache.js";
+import { isHeavySyncActiveForUser } from "./sync-busy.js";
+import { parseWebDavDate } from "./webdav-dates.js";
 
 type CachedDirectoryListing = {
   entries: DirectoryListing["entries"];
@@ -84,7 +85,7 @@ export function seedPathsFromJobPayload(selectedPaths: string | null): string[] 
   return ["/"];
 }
 
-async function upsertFolderSnapshot(
+async function upsertFolderSnapshotFromListing(
   userId: string,
   folderPath: string,
   dirLastModified: string | null,
@@ -92,21 +93,7 @@ async function upsertFolderSnapshot(
 ): Promise<void> {
   const norm = normalizePath(folderPath);
   const lastMod = parseWebDavDate(dirLastModified);
-  await prisma.cloudFolderSnapshot.upsert({
-    where: { userId_folderPath: { userId, folderPath: norm } },
-    create: {
-      userId,
-      folderPath: norm,
-      dirLastModified: lastMod,
-      dirEtag: dirEtag,
-      lastListedAt: new Date(),
-    },
-    update: {
-      dirLastModified: lastMod,
-      dirEtag: dirEtag,
-      lastListedAt: new Date(),
-    },
-  });
+  await upsertFolderSnapshot(userId, norm, lastMod, dirEtag);
 }
 
 async function storeListingCache(
@@ -129,7 +116,7 @@ async function storeListingCache(
     "EX",
     ttl
   );
-  await upsertFolderSnapshot(
+  await upsertFolderSnapshotFromListing(
     userId,
     path,
     listing.dirLastModified,
@@ -235,6 +222,13 @@ export async function invalidateAfterScanJob(
   await invalidateCloudCaches(userId, seeds);
 
   if (creds && postSyncWarmEnabled()) {
+    // Chase often starts the next delta immediately; skip warm to avoid DB pile-up.
+    if (await isHeavySyncActiveForUser(userId)) {
+      console.log(
+        `[cache-warm] skip user ${userId}: sync job still active`
+      );
+      return;
+    }
     void warmListingCaches(userId, creds, seeds).catch((err) => {
       console.warn(
         `[cache-warm] user ${userId} failed:`,

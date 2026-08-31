@@ -52,7 +52,7 @@ remote_deploy() {
   upsert_env REDIS_MAXMEMORY 512mb
   upsert_env REDIS_MAXMEMORY_POLICY noeviction
   upsert_env PAPERLESS_MEM_LIMIT 3584m
-  upsert_env PAPERLESS_TASK_WORKERS 4
+  upsert_env PAPERLESS_TASK_WORKERS 3
   upsert_env PAPERLESS_THREADS_PER_WORKER 2
   upsert_env PAPERLESS_CONVERT_MEMORY_LIMIT 1024
   upsert_env PAPERLESS_CONSUMER_POLLING 3
@@ -66,7 +66,10 @@ remote_deploy() {
   append_env_if_missing PRISMA_CONNECTION_LIMIT_APP 8
   append_env_if_missing PRISMA_CONNECTION_LIMIT_WORKER 12
   append_env_if_missing PRISMA_POOL_TIMEOUT 30
-  append_env_if_missing FOLDER_SNAPSHOT_UPSERT_CONCURRENCY 4
+  upsert_env FOLDER_SNAPSHOT_UPSERT_CONCURRENCY 2
+  append_env_if_missing FOLDER_SNAPSHOT_BATCH_SIZE 25
+  append_env_if_missing DB_HOT_CLIENTS_THRESHOLD 120
+  append_env_if_missing DB_HOT_MAX_WAIT_MS 120000
   upsert_env POST_SYNC_WARM_ENABLED true
   upsert_env POST_SYNC_WARM_MAX_DIRS 40
   upsert_env OCR_RECONCILE_INTERVAL_MS 5000

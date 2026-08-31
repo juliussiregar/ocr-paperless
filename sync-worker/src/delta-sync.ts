@@ -29,6 +29,7 @@ import {
   loadFolderSnapshots,
   shouldSkipFolderListing,
   upsertFolderSnapshot,
+  flushPendingFolderSnapshots,
 } from "./folder-cache.js";
 
 export type DeltaSyncPayload = {
@@ -228,6 +229,8 @@ export async function runDeltaSyncJob(jobId: string): Promise<void> {
         });
       },
     });
+
+    await flushPendingFolderSnapshots();
 
     const cloudFiles = listed.files.filter((f) => pathUnderRoot(f.path, rootPrefix));
 

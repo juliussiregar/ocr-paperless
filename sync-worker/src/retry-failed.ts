@@ -2,12 +2,40 @@ import { ScanJobStatus } from "@prisma/client";
 import { prisma } from "./db.js";
 import { enqueueScanJob } from "./scan-queues.js";
 import { hasActiveScanJobForUser } from "./sync.js";
-import { ingestAutoRetryMax } from "./sync-fail.js";
+import { ingestAutoRetryMax, isTransientSyncError } from "./sync-fail.js";
 import { legacyEmptyFileOrConditions } from "./empty-file.js";
 import {
   AUTO_RETRY_BATCH_SIZE,
   AUTO_RETRY_INTERVAL_MINUTES,
 } from "./sync-defaults.js";
+
+/** Prisma OR clauses for FAILED rows with known transient error text. */
+function transientErrorOrConditions(): Array<{
+  errorMessage: { contains: string; mode: "insensitive" };
+}> {
+  return [
+    { errorMessage: { contains: "too many clients", mode: "insensitive" } },
+    {
+      errorMessage: {
+        contains: "too many database connections",
+        mode: "insensitive",
+      },
+    },
+    { errorMessage: { contains: "P2037", mode: "insensitive" } },
+    { errorMessage: { contains: "503", mode: "insensitive" } },
+    {
+      errorMessage: {
+        contains: "service unavailable",
+        mode: "insensitive",
+      },
+    },
+    { errorMessage: { contains: "etimedout", mode: "insensitive" } },
+    { errorMessage: { contains: "econnreset", mode: "insensitive" } },
+    { errorMessage: { contains: "socket hang up", mode: "insensitive" } },
+    { errorMessage: { contains: "econnrefused", mode: "insensitive" } },
+    { errorMessage: { contains: "fetch failed", mode: "insensitive" } },
+  ];
+}
 
 const SETTING_AUTO_RETRY_ENABLED = "auto_retry_enabled";
 const SETTING_AUTO_RETRY_LAST_RUN_AT = "auto_retry_last_run_at";
@@ -76,15 +104,28 @@ export async function maybeAutoRetryFailed(): Promise<void> {
         NOT: { OR: legacyEmptyFileOrConditions() },
         ...(autoMax === 0
           ? {}
-          : { ingestRetryCount: 1 }),
+          : {
+              OR: [
+                { ingestRetryCount: 1 },
+                ...transientErrorOrConditions(),
+              ],
+            }),
       },
-      select: { remotePath: true },
-      take: batch,
+      select: { remotePath: true, errorMessage: true, ingestRetryCount: true },
+      take: Math.max(batch * 3, batch),
       orderBy: { updatedAt: "asc" },
     });
     if (failed.length === 0) continue;
 
-    const paths = failed.map((f) => f.remotePath);
+    // Prefer true one-shot + transient; drop permanent exhausted if OR over-matched (e.g. "503" in other text).
+    const eligible = failed.filter(
+      (f) =>
+        autoMax === 0 ||
+        f.ingestRetryCount === 1 ||
+        isTransientSyncError(f.errorMessage)
+    );
+    const paths = eligible.slice(0, batch).map((f) => f.remotePath);
+    if (paths.length === 0) continue;
     const job = await prisma.scanJob.create({
       data: {
         status: ScanJobStatus.PENDING,
