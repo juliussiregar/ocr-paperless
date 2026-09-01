@@ -5,13 +5,13 @@ SCHEMA=/app/prisma/schema.prisma
 PRISMA="node /app/node_modules/prisma/build/index.js"
 
 echo "Applying database migrations..."
-if ! $PRISMA migrate deploy --schema="$SCHEMA"; then
-  echo "migrate deploy failed; continuing with db push..."
-fi
-
-echo "Syncing schema (prisma db push)..."
-if ! $PRISMA db push --schema="$SCHEMA" --skip-generate --accept-data-loss; then
-  echo "WARN: prisma db push failed; continuing to start Next.js"
+if $PRISMA migrate deploy --schema="$SCHEMA"; then
+  echo "migrate deploy OK; skip db push to preserve pgvector columns"
+else
+  echo "migrate deploy failed; falling back to prisma db push..."
+  if ! $PRISMA db push --schema="$SCHEMA" --skip-generate; then
+    echo "WARN: prisma db push failed; continuing to start Next.js"
+  fi
 fi
 
 if [ -n "${ADMIN_EMAIL:-}" ]; then

@@ -164,6 +164,8 @@ model DocumentChunk {
   pageEstimate        Int?     @map("page_estimate")
   /// float[] embedding from OPENAI_EMBEDDING_MODEL
   embedding           Json
+  /// pgvector column for ANN search (managed via migration + worker backfill)
+  embeddingVec        Unsupported("vector")? @map("embedding_vec")
   tokenEstimate       Int      @default(0) @map("token_estimate")
   contentHash         String   @map("content_hash")
   createdAt           DateTime @default(now()) @map("created_at")
