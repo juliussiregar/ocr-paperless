@@ -43,7 +43,16 @@ type UiMessage = {
   content: string;
   citations?: ChatCitation[];
   streaming?: boolean;
+  confidence?: "high" | "medium" | "low";
+  suggestPin?: boolean;
+  relatedDocs?: ChatCitation[];
 };
+
+function confidenceUiLabel(c: "high" | "medium" | "low"): string {
+  if (c === "high") return "Tinggi";
+  if (c === "medium") return "Sedang";
+  return "Rendah";
+}
 
 type ConversationSummary = {
   id: string;
@@ -365,6 +374,12 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   const [previewResizing, setPreviewResizing] = useState(false);
   const [lastFocusIds, setLastFocusIds] = useState<number[]>([]);
   const [railDocs, setRailDocs] = useState<RailDoc[]>([]);
+  const [readiness, setReadiness] = useState<{
+    embedPct: number;
+    ocrPending: number;
+    failed: number;
+    ocrReady: number;
+  } | null>(null);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -541,6 +556,12 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     Promise.all([loadConversations(), loadContext()]).finally(() =>
       setListLoading(false)
     );
+    fetch("/api/ask/readiness")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) setReadiness(data);
+      })
+      .catch(() => {});
   }, [loadConversations, loadContext]);
 
   // Deep-link: /?doc=1,2&folder=/path&q=...
@@ -879,6 +900,11 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             citations?: ChatCitation[];
             error?: string;
             messageId?: string;
+            title?: string;
+            confidence?: "high" | "medium" | "low";
+            suggestPin?: boolean;
+            relatedDocs?: ChatCitation[];
+            retrievalScore?: number;
           };
 
           if (payload.type === "meta" && payload.conversationId) {
@@ -902,6 +928,41 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             } else {
               setStatus("Menulis jawaban…");
             }
+          }
+          if (payload.type === "ask_meta") {
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last?.role === "assistant") {
+                next[next.length - 1] = {
+                  ...last,
+                  confidence: payload.confidence,
+                  suggestPin: payload.suggestPin,
+                  relatedDocs: payload.relatedDocs,
+                };
+              }
+              return next;
+            });
+            if (payload.relatedDocs && payload.relatedDocs.length > 0) {
+              setRailDocs(
+                payload.relatedDocs.map((c) => ({ ...c, usedInAnswer: false }))
+              );
+            }
+          }
+          if (payload.type === "replace" && payload.content) {
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last?.role === "assistant") {
+                next[next.length - 1] = {
+                  ...last,
+                  content: payload.content!,
+                  streaming: true,
+                };
+              }
+              return next;
+            });
+            setStatus("Jawaban diperbarui setelah verifikasi konteks…");
           }
           if (payload.type === "token" && payload.content) {
             setMessages((prev) => {
@@ -1207,6 +1268,22 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           </div>
         )}
 
+        {readiness &&
+          (readiness.embedPct < 85 ||
+            readiness.ocrPending > 0 ||
+            readiness.failed > 20) && (
+            <div
+              className="relative z-[1] mx-5 mb-2 rounded-lg border border-amber-200/80 bg-amber-50 px-4 py-3 text-sm text-amber-950 lg:mx-8"
+            >
+              <p className="font-medium">Kualitas Ask mungkin terbatas</p>
+              <p className="mt-1 text-xs text-amber-900/80">
+                Embedding {readiness.embedPct}% ({readiness.ocrReady} dokumen OCR
+                siap). Antre OCR: {readiness.ocrPending}, gagal: {readiness.failed}.
+                Pin dokumen dengan @ dan tanya spesifik untuk hasil lebih baik.
+              </p>
+            </div>
+          )}
+
         {error && (
           <div className="relative z-[1] mx-5 mb-2 py-2 text-sm text-red-700 lg:mx-8">
             {error}
@@ -1282,6 +1359,37 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                       )}
                     </div>
                   )}
+
+                  {msg.role === "assistant" && msg.confidence && !msg.streaming && (
+                    <p className="mt-2 text-[11px] text-[var(--auth-ink)]/50">
+                      Kepercayaan jawaban: {confidenceUiLabel(msg.confidence)}
+                      {msg.suggestPin
+                        ? " · Pertimbangkan pin @ dokumen di bawah untuk fokus lebih baik"
+                        : null}
+                    </p>
+                  )}
+
+                  {msg.role === "assistant" &&
+                    msg.suggestPin &&
+                    msg.relatedDocs &&
+                    msg.relatedDocs.length > 0 &&
+                    !msg.streaming && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <span className="text-[11px] text-[var(--auth-ink)]/45">
+                          Dokumen paling relevan:
+                        </span>
+                        {msg.relatedDocs.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => openSourcePreview(c.id)}
+                            className="rounded-md bg-[var(--auth-ink)]/5 px-2 py-1 text-[11px] font-medium text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/10"
+                          >
+                            {citationLabel(c)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
 
                   {msg.role === "assistant" &&
                     !msg.streaming &&

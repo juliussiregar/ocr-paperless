@@ -79,6 +79,21 @@ remote_deploy() {
   upsert_env EMBED_BACKFILL_BATCH 35
   upsert_env EMBED_PAUSE_DURING_INGEST true
 
+  echo "==> Ask AI env defaults (D1-D3)"
+  append_env_if_missing ASK_VERIFY_ANSWER true
+  append_env_if_missing ASK_VERIFY_CONTEXT_CHARS 40000
+  append_env_if_missing ASK_AI_SEARCH_KEYWORDS true
+  append_env_if_missing ASK_HYDE_ENABLED true
+  append_env_if_missing ASK_RERANK_ENABLED true
+  append_env_if_missing ASK_SEARCH_CACHE true
+  append_env_if_missing ASK_SEARCH_CACHE_TTL_MS 60000
+  append_env_if_missing ASK_AGENT_LOOP false
+  append_env_if_missing ASK_AGENT_SECOND_PASS true
+  append_env_if_missing ASK_PGVECTOR_TOP_K 80
+  append_env_if_missing ASK_DOC_SUMMARY_ENABLED true
+  append_env_if_missing ASK_VISION_ENABLED true
+  append_env_if_missing PAPERLESS_FETCH_RETRIES 2
+
   export COMPOSE_PARALLEL_LIMIT=1
   export DOCKER_BUILDKIT=1
 
@@ -86,8 +101,12 @@ remote_deploy() {
   docker compose build sync-worker
   docker compose build app
 
-  echo "==> recreate postgres (max_connections) + redis + paperless + app + worker"
+  echo "==> recreate postgres (pgvector + max_connections) + redis + paperless + app + worker"
   docker compose up -d --force-recreate postgres redis paperless app sync-worker
+
+  echo "==> ensure pgvector extension on app DB"
+  PGUSER="$(grep '^POSTGRES_USER=' .env | cut -d= -f2- | tr -d '\r')"
+  docker compose exec -T postgres psql -U "$PGUSER" -d app -c "CREATE EXTENSION IF NOT EXISTS vector;" || true
 
   echo "==> wait for app health + schema sync"
   for _ in $(seq 1 40); do

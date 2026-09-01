@@ -16,6 +16,7 @@ import {
   serializeScope,
   type ChatScope,
 } from "@/lib/chat-scope";
+import { waitWhileDbHot } from "@/lib/db-load";
 
 export async function POST(request: NextRequest) {
   const session = await auth();
@@ -24,6 +25,7 @@ export async function POST(request: NextRequest) {
   }
 
   const userId = session.user.id;
+  const isAdmin = session.user.role === "ADMIN";
   const rl = rateLimit(`chat:${userId}`, 30, 60 * 60 * 1000);
   if (!rl.ok) {
     return NextResponse.json(
@@ -85,6 +87,8 @@ export async function POST(request: NextRequest) {
   const scope = parseScope(conversation.scope);
   const allowedIds = await resolveScopedDocIds(userId, scope);
 
+  await waitWhileDbHot({ label: "ask-chat", maxWaitMs: 45_000 });
+
   await prisma.chatMessage.create({
     data: {
       conversationId: conversation.id,
@@ -124,7 +128,10 @@ export async function POST(request: NextRequest) {
         },
         focusDocIds,
         undefined,
-        userId
+        userId,
+        undefined,
+        conversation.id,
+        isAdmin
       );
       answer = result.answer;
 
@@ -220,7 +227,16 @@ export async function POST(request: NextRequest) {
           (docsReading) => {
             send({ type: "reading", citations: docsReading });
           },
-          userId
+          userId,
+          (revised) => {
+            answer = revised;
+            send({ type: "replace", content: revised });
+          },
+          conversation!.id,
+          isAdmin,
+          (meta) => {
+            send({ type: "ask_meta", ...meta });
+          }
         );
         citations = result.citations;
         answer = result.answer;

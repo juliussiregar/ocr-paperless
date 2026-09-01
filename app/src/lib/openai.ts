@@ -1,8 +1,6 @@
 import OpenAI from "openai";
-import { searchDocuments, type PaperlessDocument } from "./paperless";
+import { searchDocuments, type PaperlessDocument, type SearchDocumentsOptions } from "./paperless";
 import {
-  cosineSimilarity,
-  embedQuery,
   estimateTokens,
   isEmbeddingConfigured,
 } from "./embeddings";
@@ -12,6 +10,26 @@ import {
   mergeUsage,
   type OpenAiUsageSnapshot,
 } from "./openai-pricing";
+import { planDocumentSearch, type SearchPlan } from "./ask-search-planner";
+import {
+  formatRetrievedSnippets,
+  bestChunkScoreForDocs,
+} from "./ask-retrieval";
+import { retrieveWithAgentLoop } from "./ask-agent";
+import {
+  mapReduceDocumentBody,
+  shouldMapReduce,
+} from "./ask-map-reduce";
+import { verifyAnswerAgainstContext, shouldVerifyAnswer } from "./ask-verify";
+import { cachedSearchDocuments } from "./ask-search-cache";
+import { embedQuery } from "./embeddings";
+import { rankDocsByDocEmbedding, loadDocSummaries } from "./ask-doc-rank";
+import {
+  computeAskConfidence,
+  shouldSuggestPin,
+  type AskConfidence,
+} from "./ask-confidence";
+import { maybeVisionContextForZrb } from "./ask-vision";
 
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
@@ -45,6 +63,33 @@ function analysisOverlapScanChars(): number {
 
 type AskIntent = "list" | "detail" | "compare" | "analyze" | "default";
 
+function chatModelForIntent(intent: AskIntent): string {
+  const analyzeModel = process.env.ASK_ANALYZE_MODEL?.trim();
+  const detailModel = process.env.ASK_DETAIL_MODEL?.trim();
+  if (intent === "analyze" && analyzeModel) return analyzeModel;
+  if (
+    (intent === "detail" || intent === "compare" || intent === "analyze") &&
+    detailModel
+  ) {
+    return detailModel;
+  }
+  return model;
+}
+
+function resolveIntent(
+  question: string,
+  hasFocus: boolean,
+  searchPlan?: SearchPlan,
+  autoFocused?: boolean
+): AskIntent {
+  const pi = searchPlan?.intent;
+  if (pi === "compare") return "compare";
+  if (pi === "list") return "list";
+  if (pi === "fact" || pi === "detail") return "detail";
+  if (pi === "analyze" && (hasFocus || autoFocused)) return "analyze";
+  return detectIntent(question, !!(hasFocus || autoFocused));
+}
+
 function getClient(): OpenAI | null {
   if (!apiKey?.startsWith("sk-")) return null;
   return new OpenAI({ apiKey });
@@ -70,13 +115,6 @@ function buildFallbackContext(docs: PaperlessDocument[]): string {
     )
     .join("\n\n---\n\n");
 }
-
-type RankedChunk = {
-  paperlessDocumentId: number;
-  content: string;
-  score: number;
-  chunkIndex: number;
-};
 
 /** Full OCR text (chunk-ordered) for deep analysis, not a summary. */
 async function buildFullDocumentBody(
@@ -119,47 +157,145 @@ async function buildFullDocumentBody(
 
 async function buildAnalyzeContext(
   docs: PaperlessDocument[],
-  userId: string | undefined
-): Promise<{ context: string; contextDocs: PaperlessDocument[] }> {
+  userId: string | undefined,
+  question: string
+): Promise<{
+  context: string;
+  contextDocs: PaperlessDocument[];
+  mapReduceUsage?: OpenAiUsageSnapshot;
+}> {
   const maxChars = fullDocMaxChars();
   const take = docs.slice(0, MAX_DOCS_ANALYZE);
   const parts: string[] = [];
+  let mapReduceUsage: OpenAiUsageSnapshot | undefined;
+
   for (let i = 0; i < take.length; i++) {
     const doc = take[i]!;
-    const body = await buildFullDocumentBody(doc, userId, maxChars);
+    const rawLen = (doc.content ?? "").replace(/\s+/g, " ").trim().length;
+    let body: string;
+
+    if (userId && shouldMapReduce(rawLen)) {
+      const mapped = await mapReduceDocumentBody({
+        doc,
+        userId,
+        question,
+      });
+      body = mapped.body;
+      mapReduceUsage = mapReduceUsage
+        ? mergeUsage(mapReduceUsage, mapped.usage)
+        : mapped.usage;
+    } else {
+      body = await buildFullDocumentBody(doc, userId, maxChars);
+    }
+
     parts.push(
-      `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nTeks OCR (utuh, berurutan):\n${body || "(kosong)"}`
+      `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nTeks OCR (utuh/ringkas map-reduce):\n${body || "(kosong)"}`
     );
   }
-  return { context: parts.join("\n\n---\n\n"), contextDocs: take };
+  return {
+    context: parts.join("\n\n---\n\n"),
+    contextDocs: take,
+    mapReduceUsage,
+  };
 }
 
 /**
  * Hybrid: rank stored chunks by cosine vs question among candidate docs.
  * List/search questions prefer breadth (all candidates) over deep chunks.
  */
+function minOcrChars(): number {
+  const n = Number(process.env.ASK_MIN_OCR_CHARS ?? "100");
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(5000, Math.max(0, Math.floor(n)));
+}
+
+function ocrContentLen(d: PaperlessDocument): number {
+  return (d.content ?? "").replace(/\s+/g, " ").trim().length;
+}
+
+function passesOcrGate(
+  d: PaperlessDocument,
+  isList: boolean,
+  nameScore: number
+): boolean {
+  if (isList) return true;
+  if (nameScore >= 50) return true;
+  return ocrContentLen(d) >= minOcrChars();
+}
+
+function autoFocusRatio(): number {
+  const n = Number(process.env.ASK_AUTO_FOCUS_RATIO ?? "1.5");
+  return Number.isFinite(n) ? Math.min(3, Math.max(1.1, n)) : 1.5;
+}
+
+function applyAutoFocus(
+  ranked: PaperlessDocument[],
+  scores: Map<number, number>,
+  intent: AskIntent,
+  hasFocus: boolean
+): { docs: PaperlessDocument[]; autoFocused: boolean } {
+  if (hasFocus || intent === "list" || intent === "compare") {
+    return { docs: ranked, autoFocused: false };
+  }
+  const top = ranked[0];
+  const second = ranked[1];
+  if (!top) return { docs: ranked, autoFocused: false };
+  const s1 = scores.get(top.id) ?? 0;
+  const s2 = second ? (scores.get(second.id) ?? 0) : 0;
+  const ratio = autoFocusRatio();
+  if (s1 < 35) return { docs: ranked, autoFocused: false };
+  if (s2 > 0 && s1 < s2 * ratio) return { docs: ranked, autoFocused: false };
+  if (
+    intent === "detail" ||
+    intent === "analyze"
+  ) {
+    return { docs: [top], autoFocused: true };
+  }
+  return { docs: ranked, autoFocused: false };
+}
+
 async function buildContext(
   docs: PaperlessDocument[],
   question: string,
   userId?: string,
-  intent: AskIntent = "default"
+  intent: AskIntent = "default",
+  keywords?: string[],
+  allRankedDocs?: PaperlessDocument[],
+  isAdmin?: boolean
 ): Promise<{
   context: string;
   contextDocs: PaperlessDocument[];
   embeddingHits: number;
   embeddingTokens: number;
+  mapReduceUsage?: OpenAiUsageSnapshot;
+  retrievalScore: number;
+  rerankUsage?: OpenAiUsageSnapshot;
+  hydeUsage?: OpenAiUsageSnapshot;
+  visionUsage?: OpenAiUsageSnapshot;
 }> {
   if (docs.length === 0) {
-    return { context: "", contextDocs: [], embeddingHits: 0, embeddingTokens: 0 };
+    return {
+      context: "",
+      contextDocs: [],
+      embeddingHits: 0,
+      embeddingTokens: 0,
+      retrievalScore: 0,
+    };
   }
 
   if (intent === "analyze") {
-    const { context, contextDocs } = await buildAnalyzeContext(docs, userId);
+    const { context, contextDocs, mapReduceUsage } = await buildAnalyzeContext(
+      docs,
+      userId,
+      question
+    );
     return {
       context,
       contextDocs,
       embeddingHits: 0,
       embeddingTokens: 0,
+      mapReduceUsage,
+      retrievalScore: 0,
     };
   }
 
@@ -174,124 +310,71 @@ async function buildContext(
   const maxChunks = isDetail ? MAX_CHUNKS_DETAIL : MAX_CHUNKS_IN_CONTEXT;
   const chunksPerDoc = isDetail ? 6 : 3;
 
+  // Single pinned large doc: map-reduce instead of thin chunk window
+  if (
+    isDetail &&
+    !isList &&
+    userId &&
+    docs.length === 1 &&
+    shouldMapReduce((docs[0]?.content ?? "").replace(/\s+/g, " ").trim().length)
+  ) {
+    const doc = docs[0]!;
+    const mapped = await mapReduceDocumentBody({
+      doc,
+      userId,
+      question,
+    });
+    const body = mapped.body || "(kosong)";
+    return {
+      context: `[Dokumen 1] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nRingkasan map-reduce:\n${body}`,
+      contextDocs: [doc],
+      embeddingHits: 0,
+      embeddingTokens: 0,
+      mapReduceUsage: mapped.usage,
+      retrievalScore: 0,
+    };
+  }
+
   // Broad list: rich excerpts scored around query terms (not only doc head)
   if (isList) {
     const take = docs.slice(0, maxDocs);
     const context = take
       .map((doc, i) => {
-        const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+        const body = bestContentWindow(doc.content ?? "", question, bodyChars, keywords);
         return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
       })
       .join("\n\n---\n\n");
-    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0 };
+    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0, retrievalScore: 0 };
   }
 
   if (!userId || !isEmbeddingConfigured()) {
     const take = docs.slice(0, maxDocs);
     const context = take
       .map((doc, i) => {
-        const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+        const body = bestContentWindow(doc.content ?? "", question, bodyChars, keywords);
         return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
       })
       .join("\n\n---\n\n");
-    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0 };
+    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0, retrievalScore: 0 };
   }
 
-  const docIds = docs.map((d) => d.id);
   const docMap = new Map(docs.map((d) => [d.id, d]));
-  let embeddingHits = 0;
-  let embeddingTokens = 0;
+  const summaries =
+    userId ? await loadDocSummaries(userId, docs.map((d) => d.id)) : new Map();
 
   try {
-    const { prisma } = await import("./prisma");
-    const rows = await prisma.documentChunk.findMany({
-      where: {
-        userId,
-        paperlessDocumentId: { in: docIds },
-      },
-      select: {
-        paperlessDocumentId: true,
-        content: true,
-        embedding: true,
-        chunkIndex: true,
-      },
-      take: 3000,
+    const retrieval = await retrieveWithAgentLoop({
+      userId,
+      allRankedDocs: allRankedDocs ?? docs,
+      activeDocs: docs,
+      question,
+      keywords,
+      maxChunks,
+      chunksPerDoc,
+      maxChunkChars: MAX_CHUNK_CHARS,
     });
 
-    const docsWithChunks = new Set(rows.map((r) => r.paperlessDocumentId));
-    let queryVec: number[] | null = null;
-    if (rows.length > 0) {
-      queryVec = await embedQuery(question);
-      if (queryVec) {
-        embeddingHits = 1;
-        embeddingTokens = estimateTokens(question.slice(0, 8000));
-      }
-    }
-
-    const byDocSnippets = new Map<number, string[]>();
-    const chunkOrder: number[] = [];
-    const docBestScore = new Map<number, number>();
-    const pickedChunkKeys = new Set<string>();
-
-    const pickChunk = (
-      paperlessDocumentId: number,
-      content: string,
-      chunkIndex: number
-    ) => {
-      const key = `${paperlessDocumentId}:${chunkIndex}`;
-      if (pickedChunkKeys.has(key)) return;
-      if (!byDocSnippets.has(paperlessDocumentId)) {
-        byDocSnippets.set(paperlessDocumentId, []);
-        chunkOrder.push(paperlessDocumentId);
-      }
-      const bag = byDocSnippets.get(paperlessDocumentId)!;
-      if (bag.length >= chunksPerDoc) return;
-      pickedChunkKeys.add(key);
-      bag.push(content.slice(0, MAX_CHUNK_CHARS));
-    };
-
-    if (queryVec && rows.length > 0) {
-      const ranked: RankedChunk[] = [];
-      const rowByDocIdx = new Map<string, { content: string; chunkIndex: number }>();
-      for (const row of rows) {
-        rowByDocIdx.set(
-          `${row.paperlessDocumentId}:${row.chunkIndex}`,
-          { content: row.content, chunkIndex: row.chunkIndex }
-        );
-        const emb = row.embedding;
-        if (!Array.isArray(emb) || emb.length === 0) continue;
-        const score = cosineSimilarity(queryVec, emb as number[]);
-        ranked.push({
-          paperlessDocumentId: row.paperlessDocumentId,
-          content: row.content,
-          score,
-          chunkIndex: row.chunkIndex,
-        });
-        const prev = docBestScore.get(row.paperlessDocumentId) ?? -1;
-        if (score > prev) docBestScore.set(row.paperlessDocumentId, score);
-      }
-      ranked.sort((a, b) => b.score - a.score);
-      for (const c of ranked.slice(0, maxChunks)) {
-        pickChunk(c.paperlessDocumentId, c.content, c.chunkIndex);
-        for (const neighbor of [-1, 1]) {
-          const adj = rowByDocIdx.get(
-            `${c.paperlessDocumentId}:${c.chunkIndex + neighbor}`
-          );
-          if (adj) {
-            pickChunk(
-              c.paperlessDocumentId,
-              adj.content,
-              c.chunkIndex + neighbor
-            );
-          }
-        }
-      }
-      // Prefer docs with stronger chunk hits first
-      chunkOrder.sort(
-        (a, b) => (docBestScore.get(b) ?? 0) - (docBestScore.get(a) ?? 0)
-      );
-    }
-
+    const docsWithChunks = new Set(retrieval.docOrder);
     const fallbackOrder = docs
       .map((d) => d.id)
       .filter((id) => !docsWithChunks.has(id));
@@ -307,16 +390,18 @@ async function buildContext(
       seen.add(id);
       contextDocs.push(doc);
       const i = contextDocs.length;
+      const summary = summaries.get(id);
+      const summaryLine = summary ? `Ringkasan indeks: ${summary}\n\n` : "";
       parts.push(
-        `[Dokumen ${i}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\n${body}`
+        `[Dokumen ${i}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\n${summaryLine}${body}`
       );
     };
 
-    for (const id of chunkOrder) {
-      const snippets = byDocSnippets.get(id) ?? [];
+    for (const id of retrieval.docOrder) {
+      const chunks = retrieval.byDoc.get(id) ?? [];
       pushDoc(
         id,
-        `Cuplikan relevan:\n${snippets.join("\n\n…\n\n")}`
+        `Cuplikan relevan:\n${formatRetrievedSnippets(chunks, MAX_CHUNK_CHARS)}`
       );
     }
     for (const id of fallbackOrder) {
@@ -324,43 +409,65 @@ async function buildContext(
       if (!doc) continue;
       pushDoc(
         id,
-        `Isi:\n${bestContentWindow(doc.content ?? "", question, bodyChars) || "(kosong)"}`
+        `Isi:\n${bestContentWindow(doc.content ?? "", question, bodyChars, keywords) || "(kosong)"}`
       );
     }
+
+    let visionUsage: OpenAiUsageSnapshot | undefined;
+    if (isAdmin && contextDocs.length === 1) {
+      const vision = await maybeVisionContextForZrb({
+        isAdmin: true,
+        question,
+        keywords,
+        doc: contextDocs[0]!,
+      });
+      if (vision?.context && parts.length > 0) {
+        parts[0] = `${parts[0]}\n\n${vision.context}`;
+        visionUsage = vision.usage;
+      }
+    }
+
+    const baseReturn = {
+      embeddingHits: retrieval.embeddingHits,
+      embeddingTokens: retrieval.embeddingTokens,
+      retrievalScore: retrieval.bestScore,
+      rerankUsage: retrieval.rerankUsage,
+      hydeUsage: retrieval.hydeUsage,
+      visionUsage,
+    };
 
     if (parts.length === 0) {
       const take = docs.slice(0, maxDocs);
       return {
         context: take
           .map((doc, i) => {
-            const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+            const body = bestContentWindow(doc.content ?? "", question, bodyChars, keywords);
             return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
           })
           .join("\n\n---\n\n"),
         contextDocs: take,
-        embeddingHits,
-        embeddingTokens,
+        ...baseReturn,
       };
     }
 
     return {
       context: parts.join("\n\n---\n\n"),
       contextDocs,
-      embeddingHits,
-      embeddingTokens,
+      ...baseReturn,
     };
   } catch {
     const take = docs.slice(0, maxDocs);
     return {
       context: take
         .map((doc, i) => {
-          const body = bestContentWindow(doc.content ?? "", question, bodyChars);
+          const body = bestContentWindow(doc.content ?? "", question, bodyChars, keywords);
           return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
         })
         .join("\n\n---\n\n"),
       contextDocs: take,
-      embeddingHits,
-      embeddingTokens,
+      embeddingHits: 0,
+      embeddingTokens: 0,
+      retrievalScore: 0,
     };
   }
 }
@@ -377,7 +484,18 @@ export interface ChatResult {
   answer: string;
   citations: ChatCitation[];
   usage?: OpenAiUsageSnapshot;
+  confidence?: AskConfidence;
+  relatedDocs?: ChatCitation[];
+  suggestPin?: boolean;
+  retrievalScore?: number;
 }
+
+export type AskStreamMeta = {
+  confidence: AskConfidence;
+  relatedDocs: ChatCitation[];
+  suggestPin: boolean;
+  retrievalScore: number;
+};
 
 export type ChatHistoryMessage = {
   role: "user" | "assistant";
@@ -390,10 +508,13 @@ Jika informasi tidak ada di konteks, katakan dengan jujur bahwa tidak ditemukan.
 
 Mode jawaban:
 - Pencarian/daftar ("cari", "lihat dokumen tentang", "apa saja", "sebutkan"): cantumkan SEMUA dokumen di konteks. Jangan dipotong jadi 3 kalau konteks berisi 8.
+- Tanpa pin @: user mungkin tidak tahu file mana; sebut nama dokumen sumber jelas saat menjawab detail/fakta.
 - Detail ("jelaskan", "uraikan", "apa isinya", "poin penting", "keputusan", "analisis"): gali dalam dokumen paling relevan; kutip fakta konkret (tanggal, pihak, nomor surat, agenda, keputusan) bila ada di konteks.
 - Analisis ("dampak", "implikasi", "hubungan", pertanyaan tersirat): baca konteks sebagai teks OCR utuh/cuplikan berurutan, inferensi hanya dari bukti di teks; sebut jika jawaban tidak eksplisit di dokumen.
 - Perbandingan: hanya dokumen yang diminta; persamaan, perbedaan, kesimpulan.
+- Detail / fakta angka ("berapa", "jumlah", "total"): jawab langsung dengan angka atau rentang dari konteks; kutip cuplikan pendek sebagai bukti; sebut halaman jika ada di cuplikan.
 - Jangan mengarang. Saat menyebut sumber, pakai field "Nama" (bukan nama file mentah / angka panjang).
+- Untuk angka, nama, tanggal: selalu sertakan kutipan singkat dari cuplikan konteks sebagai bukti.
 
 Format daftar (bila >1 dokumen):
 1. **Nama dokumen**
@@ -486,10 +607,10 @@ function wantsRecency(question: string): boolean {
 /** Broad search / list: user wants coverage, not a deep dive on one file. */
 function wantsDocList(question: string): boolean {
   return (
-    /\b(cari|lihat|temukan|sebutkan|daftar|apa saja|apa aja|dokumen tentang|yang terkait|yang relevan|semua|berapa)\b/i.test(
+    /\b(cari|lihat|temukan|sebutkan|daftar|apa saja|apa aja|dokumen tentang|yang terkait|yang relevan|semua)\b/i.test(
       question
     ) &&
-    !/\b(bandingkan|perbandingan|ringkas isi|jelaskan detail|analisis mendalam|uraikan)\b/i.test(
+    !/\b(bandingkan|perbandingan|ringkas isi|jelaskan detail|analisis mendalam|uraikan|berapa|berapa banyak|berapa besar)\b/i.test(
       question
     )
   );
@@ -515,26 +636,6 @@ function extractRequestedLimit(question: string): number | null {
   return null;
 }
 
-function extractSearchQuery(question: string): string {
-  const cleaned = question
-    .replace(
-      /\b(saya mau|tolong|mohon|bisa|lihat|cari|ada|sebutkan|daftar|ringkas|jelaskan)\b/gi,
-      " "
-    )
-    .replace(
-      /\b(dokumen|file|pdf|arsip)?\s*(tentang|mengenai|terkait|soal)\b/gi,
-      " "
-    )
-    .replace(
-      /\b(apa saja|apa aja|yang|berapa|\d+|lima|terbaru|terkini|terakhir)\b/gi,
-      " "
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.length >= 3 ? cleaned : question.trim();
-}
-
-
 function queryTokens(question: string): string[] {
   return question
     .toLowerCase()
@@ -549,12 +650,32 @@ function queryTokens(question: string): string[] {
     );
 }
 
+/** Merge planner keywords with question tokens for ranking / snippet windows. */
+function rankingTokens(question: string, keywords?: string[]): string[] {
+  const out: string[] = [];
+  const push = (t: string) => {
+    const w = t.toLowerCase().trim();
+    if (w.length > 2 && !out.includes(w)) out.push(w);
+  };
+  for (const k of keywords ?? []) {
+    for (const t of queryTokens(k)) push(t);
+    push(k);
+  }
+  for (const t of queryTokens(question)) push(t);
+  return out.slice(0, 16);
+}
+
 /** Prefer a window of OCR text dense with query terms over the document head. */
-function bestContentWindow(content: string, question: string, maxChars: number): string {
+function bestContentWindow(
+  content: string,
+  question: string,
+  maxChars: number,
+  keywords?: string[]
+): string {
   const text = (content || "").replace(/\s+/g, " ").trim();
   if (!text) return "";
   if (text.length <= maxChars) return text;
-  const tokens = queryTokens(question).slice(0, 12);
+  const tokens = rankingTokens(question, keywords).slice(0, 12);
   if (tokens.length === 0) return text.slice(0, maxChars);
 
   const lower = text.toLowerCase();
@@ -586,11 +707,15 @@ function bestContentWindow(content: string, question: string, maxChars: number):
   return slice;
 }
 
-function contentOverlapScore(question: string, d: PaperlessDocument): number {
+function contentOverlapScore(
+  question: string,
+  d: PaperlessDocument,
+  keywords?: string[]
+): number {
   const scanLen = analysisOverlapScanChars();
   const body = (d.content ?? "").toLowerCase().slice(0, scanLen);
   if (!body) return 0;
-  const tokens = queryTokens(question).slice(0, 10);
+  const tokens = rankingTokens(question, keywords).slice(0, 12);
   if (tokens.length === 0) return 0;
   let hits = 0;
   for (const t of tokens) {
@@ -599,54 +724,40 @@ function contentOverlapScore(question: string, d: PaperlessDocument): number {
   return (hits / tokens.length) * 40 + hits * 2;
 }
 
-/** Extra Paperless queries to catch alternate phrasing / partial titles. */
-function expandSearchQueries(question: string): string[] {
-  const primary = extractSearchQuery(question);
-  const out: string[] = [];
-  const push = (q: string) => {
-    const t = q.replace(/\s+/g, " ").trim();
-    if (t.length >= 3 && !out.some((x) => x.toLowerCase() === t.toLowerCase())) {
-      out.push(t);
-    }
-  };
-  push(primary);
-  const tokens = queryTokens(primary);
-  if (tokens.length >= 3) {
-    push(tokens.slice(0, 4).join(" "));
-    push(tokens.slice(-3).join(" "));
-  }
-  if (tokens.length >= 2) {
-    push(tokens.join(" "));
-  }
-  // Keep longest distinctive phrase (often the topic)
-  const quoted = question.match(/["“](.+?)["”]/);
-  if (quoted?.[1]) push(quoted[1]);
-  return out.slice(0, 4);
-}
-
 function docLabel(d: PaperlessDocument): string {
   return `${d.title} ${d.original_file_name}`.toLowerCase();
 }
 
 /** Higher = better match between question text and document name */
-function nameOverlapScore(question: string, d: PaperlessDocument): number {
+function nameOverlapScore(
+  question: string,
+  d: PaperlessDocument,
+  keywords?: string[]
+): number {
   const q = question
     .toLowerCase()
     .replace(/^ringkas isi[:\s]+/i, "")
     .replace(/\.pdf$/i, "");
   const name = docLabel(d).replace(/\.pdf$/i, "");
-  if (!q || !name) return 0;
-  if (name.includes(q.slice(0, 40)) || q.includes(name.slice(0, 40))) return 100;
-  const words = q
-    .split(/[^a-z0-9à-ü]+/i)
-    .map((w) => w.trim())
-    .filter((w) => w.length > 2);
-  if (words.length === 0) return 0;
+  if (!name) return 0;
+
+  let score = 0;
+  for (const k of keywords ?? []) {
+    const kl = k.toLowerCase().trim();
+    if (kl.length >= 4 && name.includes(kl)) score += 35;
+  }
+
+  if (!q) return score;
+  if (name.includes(q.slice(0, 40)) || q.includes(name.slice(0, 40))) {
+    return score + 100;
+  }
+  const words = rankingTokens(question, keywords).filter((w) => w.length > 2);
+  if (words.length === 0) return score;
   let hits = 0;
   for (const w of words) {
     if (name.includes(w)) hits += 1;
   }
-  return (hits / words.length) * 50 + hits;
+  return score + (hits / words.length) * 50 + hits;
 }
 
 /** Keep only citations that the answer actually refers to. */
@@ -713,15 +824,76 @@ function toCitation(d: PaperlessDocument): ChatCitation {
   };
 }
 
+/** Discover docs by filename/path in user's library (scoped), without pin @. */
+async function boostCandidatesFromLibraryNames(
+  userId: string,
+  allowed: Set<number> | null,
+  keywords: string[],
+  addDoc: (d: PaperlessDocument) => void,
+  getDocument: (id: number) => Promise<PaperlessDocument>
+): Promise<void> {
+  if (keywords.length === 0) return;
+  const { prisma } = await import("./prisma");
+  const { SyncStatus } = await import("@prisma/client");
+
+  const orConditions = keywords.flatMap((k) => {
+    const t = k.trim();
+    if (t.length < 3) return [];
+    return [
+      { fileName: { contains: t, mode: "insensitive" as const } },
+      { remotePath: { contains: t, mode: "insensitive" as const } },
+    ];
+  });
+  if (orConditions.length === 0) return;
+
+  const allowedList = allowed ? [...allowed] : undefined;
+  if (allowed && allowedList!.length === 0) return;
+
+  const rows = await prisma.syncFile.findMany({
+    where: {
+      userId,
+      syncStatus: { in: [SyncStatus.OCR_DONE, SyncStatus.SKIPPED] },
+      paperlessDocumentId: { not: null },
+      ...(allowedList ? { paperlessDocumentId: { in: allowedList } } : {}),
+      OR: orConditions,
+    },
+    select: { paperlessDocumentId: true },
+    orderBy: { updatedAt: "desc" },
+    take: 40,
+  });
+
+  for (const row of rows) {
+    const id = row.paperlessDocumentId;
+    if (!id) continue;
+    try {
+      addDoc(await getDocument(id));
+    } catch {
+      // skip
+    }
+  }
+}
+
 async function resolveDocs(
   question: string,
   allowedDocIds?: number[],
   focusDocIds?: number[],
-  userId?: string
-): Promise<{ docs: PaperlessDocument[]; emptyReason?: string }> {
+  userId?: string,
+  history: ChatHistoryMessage[] = [],
+  conversationId?: string,
+  opts?: { skipAutoFocus?: boolean }
+): Promise<{
+  docs: PaperlessDocument[];
+  allRanked: PaperlessDocument[];
+  emptyReason?: string;
+  searchPlan?: SearchPlan;
+  autoFocused?: boolean;
+  relatedDocs?: ChatCitation[];
+  docScores?: Map<number, number>;
+}> {
   if (allowedDocIds && allowedDocIds.length === 0) {
     return {
       docs: [],
+      allRanked: [],
       emptyReason:
         "Belum ada dokumen ter-index untuk akun Anda. Ambil PDF lewat Library terlebih dahulu.",
     };
@@ -746,16 +918,40 @@ async function resolveDocs(
         // skip
       }
     }
-    if (focused.length > 0) return { docs: focused };
+    if (focused.length > 0) {
+      return { docs: focused, allRanked: focused };
+    }
+    return {
+      docs: [],
+      allRanked: [],
+      emptyReason:
+        "Dokumen yang dipin (@) tidak dapat dibuka. Coba unpin lalu pin lagi, atau periksa akses dokumen di Library.",
+    };
   }
 
   const candidates: PaperlessDocument[] = [];
   const seen = new Set<number>();
   const favoriteIds = new Set<number>();
-  const searchQueries = expandSearchQueries(question);
-  const searchQ = searchQueries[0] ?? extractSearchQuery(question);
+  const searchPlan = await planDocumentSearch(question, history);
+  const searchQueries = searchPlan.queries;
+  const searchQ =
+    searchPlan.keywords.join(" ") ||
+    searchQueries[0] ||
+    question.trim();
   const ordering = wantsRecency(question) ? "-created" : undefined;
-  const intent = detectIntent(question, focus.length > 0);
+  const intentPreview = resolveIntent(question, focus.length > 0, searchPlan);
+  const isListIntent =
+    intentPreview === "list" || wantsDocList(question) || searchPlan.intent === "list";
+  const searchPageSize = isListIntent ? 50 : 30;
+
+  const cachedSearch = (q: string, opts?: SearchDocumentsOptions) =>
+    cachedSearchDocuments(
+      searchDocuments,
+      q,
+      opts ?? {},
+      userId,
+      conversationId
+    );
 
   const addDoc = (d: PaperlessDocument) => {
     if (allowed && !allowed.has(d.id)) return;
@@ -767,15 +963,38 @@ async function resolveDocs(
   // Multi-query hybrid: full-text + title for each phrasing variant
   for (const q of searchQueries) {
     const [fullText, titleHit] = await Promise.all([
-      searchDocuments(q, { page: 1, pageSize: 25, ordering }),
-      searchDocuments(q, {
+      cachedSearch(q, { page: 1, pageSize: searchPageSize, ordering }),
+      cachedSearch(q, {
         page: 1,
-        pageSize: 20,
+        pageSize: Math.min(40, searchPageSize),
         titleOnly: true,
         ordering,
       }),
     ]);
     for (const d of fullText.results) addDoc(d);
+    for (const d of titleHit.results) addDoc(d);
+  }
+
+  // Scoped filename/path match (Bappenas: UND, MAT, Rapat, ZRB in file names)
+  if (userId && searchPlan.keywords.length > 0) {
+    await boostCandidatesFromLibraryNames(
+      userId,
+      allowed,
+      searchPlan.keywords,
+      addDoc,
+      getDocument
+    );
+  }
+
+  // Also search each planner keyword as title substring
+  for (const kw of searchPlan.keywords.slice(0, 4)) {
+    if (kw.trim().length < 3) continue;
+    const titleHit = await cachedSearch(kw, {
+      page: 1,
+      pageSize: 25,
+      titleOnly: true,
+      ordering,
+    });
     for (const d of titleHit.results) addDoc(d);
   }
 
@@ -846,34 +1065,106 @@ async function resolveDocs(
   if (candidates.length === 0) {
     return {
       docs: [],
+      allRanked: [],
       emptyReason:
         "Tidak ada dokumen relevan ditemukan. Coba ubah pertanyaan, pin dokumen dengan @, atau perluas scope.",
     };
   }
 
-  const ranked = wantsRecency(question)
+  let ranked = wantsRecency(question)
     ? candidates
     : [...candidates].sort((a, b) => {
         const favBoost = (d: PaperlessDocument) =>
           favoriteIds.has(d.id) ? 25 : 0;
         const score = (d: PaperlessDocument) =>
-          nameOverlapScore(question, d) +
-          contentOverlapScore(question, d) +
+          nameOverlapScore(question, d, searchPlan.keywords) +
+          contentOverlapScore(question, d, searchPlan.keywords) +
           favBoost(d);
         return score(b) - score(a);
       });
 
+  const docScores = new Map<number, number>();
+  const scoreDoc = (d: PaperlessDocument) => {
+    const favBoost = favoriteIds.has(d.id) ? 25 : 0;
+    return (
+      nameOverlapScore(question, d, searchPlan.keywords) +
+      contentOverlapScore(question, d, searchPlan.keywords) +
+      favBoost
+    );
+  };
+  for (const d of ranked) docScores.set(d.id, scoreDoc(d));
+
+  if (userId && isEmbeddingConfigured() && ranked.length > 0) {
+    const queryText = [question, searchPlan.keywords.join(" ")]
+      .join(" ")
+      .trim()
+      .slice(0, 8000);
+    const queryVec = await embedQuery(queryText);
+    if (queryVec) {
+      const docEmbed = await rankDocsByDocEmbedding(
+        userId,
+        ranked.slice(0, MAX_CANDIDATE_DOCS),
+        queryVec
+      );
+      const chunkBoost = await bestChunkScoreForDocs(
+        userId,
+        ranked.slice(0, 25).map((d) => d.id),
+        question,
+        searchPlan.keywords,
+        queryVec
+      );
+      for (const d of ranked.slice(0, MAX_CANDIDATE_DOCS)) {
+        const base = docScores.get(d.id) ?? scoreDoc(d);
+        const emb = docEmbed.get(d.id) ?? 0;
+        const chunk = (chunkBoost.get(d.id) ?? 0) * 40;
+        docScores.set(d.id, base + emb + chunk);
+      }
+      ranked = [...ranked].sort(
+        (a, b) => (docScores.get(b.id) ?? 0) - (docScores.get(a.id) ?? 0)
+      );
+    }
+  }
+
+  ranked = ranked.filter((d) =>
+    passesOcrGate(
+      d,
+      isListIntent,
+      nameOverlapScore(question, d, searchPlan.keywords)
+    )
+  );
+
+  if (ranked.length === 0 && candidates.length > 0) {
+    ranked = [...candidates]
+      .sort(
+        (a, b) =>
+          (docScores.get(b.id) ?? scoreDoc(b)) - (docScores.get(a.id) ?? scoreDoc(a))
+      )
+      .slice(0, MAX_CANDIDATE_DOCS);
+  }
+
+  const relatedDocs = ranked.slice(0, 3).map(toCitation);
+
   const takeN =
-    intent === "analyze"
+    intentPreview === "analyze"
       ? MAX_DOCS_ANALYZE
-      : intent === "list" || wantsDocList(question)
+      : intentPreview === "list" || wantsDocList(question)
         ? MAX_CONTEXT_DOCS
-        : intent === "detail" || intent === "compare"
+        : intentPreview === "detail" || intentPreview === "compare"
           ? Math.min(MAX_DOCS_DETAIL + 1, limit)
           : Math.min(limit, MAX_CANDIDATE_DOCS);
 
+  const sliced = ranked.slice(0, takeN);
+  const { docs: finalDocs, autoFocused } = opts?.skipAutoFocus
+    ? { docs: sliced, autoFocused: false }
+    : applyAutoFocus(sliced, docScores, intentPreview, focus.length > 0);
+
   return {
-    docs: ranked.slice(0, takeN),
+    docs: finalDocs,
+    allRanked: ranked,
+    searchPlan,
+    autoFocused,
+    relatedDocs,
+    docScores,
   };
 }
 
@@ -911,12 +1202,51 @@ function buildMessages(
   ];
 }
 
+function rankingTopScores(docScores: Map<number, number> | undefined, ranked: PaperlessDocument[]): {
+  top: number;
+  second: number;
+} {
+  if (!docScores || ranked.length === 0) return { top: 0, second: 0 };
+  const top = docScores.get(ranked[0]!.id) ?? 0;
+  const second = ranked[1] ? (docScores.get(ranked[1]!.id) ?? 0) : 0;
+  return { top, second };
+}
+
+function stackAskUsage(
+  chatModel: string,
+  parts: {
+    searchPlan?: SearchPlan;
+    mapReduce?: OpenAiUsageSnapshot;
+    verify?: OpenAiUsageSnapshot;
+    rerank?: OpenAiUsageSnapshot;
+    hyde?: OpenAiUsageSnapshot;
+    vision?: OpenAiUsageSnapshot;
+    chat?: Partial<OpenAiUsageSnapshot>;
+  }
+): OpenAiUsageSnapshot {
+  let u = parts.searchPlan?.usage ?? emptyUsage(chatModel);
+  if (parts.mapReduce) u = mergeUsage(u, parts.mapReduce);
+  if (parts.verify) u = mergeUsage(u, parts.verify);
+  if (parts.rerank) u = mergeUsage(u, parts.rerank);
+  if (parts.hyde) u = mergeUsage(u, parts.hyde);
+  if (parts.vision) u = mergeUsage(u, parts.vision);
+  if (parts.chat) {
+    u = mergeUsage(u, {
+      model: chatModel,
+      ...parts.chat,
+    });
+  }
+  return u;
+}
+
 export async function askDocuments(
   question: string,
   allowedDocIds?: number[],
   history: ChatHistoryMessage[] = [],
   focusDocIds?: number[],
-  userId?: string
+  userId?: string,
+  conversationId?: string,
+  isAdmin?: boolean
 ): Promise<ChatResult> {
   const client = getClient();
   if (!client) {
@@ -925,24 +1255,58 @@ export async function askDocuments(
     );
   }
 
-  const { docs, emptyReason } = await resolveDocs(
+  const {
+    docs,
+    allRanked,
+    emptyReason,
+    searchPlan,
+    autoFocused,
+    relatedDocs,
+    docScores,
+  } = await resolveDocs(
     question,
     allowedDocIds,
     focusDocIds,
-    userId
+    userId,
+    history,
+    conversationId
   );
   if (docs.length === 0) {
     return {
       answer: emptyReason ?? "Tidak ada dokumen.",
       citations: [],
-      usage: emptyUsage(model),
+      usage: searchPlan?.usage ?? emptyUsage(model),
     };
   }
 
-  const intent = detectIntent(question, (focusDocIds?.length ?? 0) > 0);
-  const { context, contextDocs, embeddingHits, embeddingTokens } =
-    await buildContext(docs, question, userId, intent);
+  const hasFocus = (focusDocIds?.length ?? 0) > 0;
+  const intent = resolveIntent(
+    question,
+    !!(hasFocus || autoFocused),
+    searchPlan,
+    autoFocused
+  );
+  const {
+    context,
+    contextDocs,
+    embeddingHits,
+    embeddingTokens,
+    mapReduceUsage,
+    retrievalScore,
+    rerankUsage,
+    hydeUsage,
+    visionUsage,
+  } = await buildContext(
+    docs,
+    question,
+    userId,
+    intent,
+    searchPlan?.keywords,
+    allRanked,
+    isAdmin
+  );
   const listMode = intent === "list" || wantsDocList(question);
+  const chatModelUsed = chatModelForIntent(intent);
   const maxTokens =
     intent === "analyze"
       ? 3200
@@ -953,7 +1317,7 @@ export async function askDocuments(
           : 1600;
 
   const completion = await client.chat.completions.create({
-    model,
+    model: chatModelUsed,
     messages: buildMessages(
       context,
       history,
@@ -965,20 +1329,46 @@ export async function askDocuments(
     max_tokens: maxTokens,
   });
 
-  const answer =
+  let answer =
     completion.choices[0]?.message?.content ??
     "Maaf, tidak dapat menghasilkan jawaban.";
 
+  let verifyUsage: OpenAiUsageSnapshot | undefined;
+  if (shouldVerifyAnswer(intent, question)) {
+    const verified = await verifyAnswerAgainstContext({
+      context,
+      question,
+      answer,
+    });
+    answer = verified.answer;
+    verifyUsage = verified.usage;
+  }
+
   const promptTokens = completion.usage?.prompt_tokens ?? 0;
   const completionTokens = completion.usage?.completion_tokens ?? 0;
-  const usage = mergeUsage(emptyUsage(model), {
-    model,
-    promptTokens,
-    completionTokens,
-    embeddingHits,
-    embeddingTokens,
-    chatHits: 1,
+  const usage = stackAskUsage(chatModelUsed, {
+    searchPlan,
+    mapReduce: mapReduceUsage,
+    verify: verifyUsage,
+    rerank: rerankUsage,
+    hyde: hydeUsage,
+    vision: visionUsage,
+    chat: {
+      promptTokens,
+      completionTokens,
+      embeddingHits,
+      embeddingTokens,
+      chatHits: 1,
+    },
   });
+
+  const rankScores = rankingTopScores(docScores, allRanked);
+  const confidence = computeAskConfidence(
+    retrievalScore,
+    rankScores.top,
+    rankScores.second
+  );
+  const suggestPin = shouldSuggestPin(confidence, hasFocus, intent);
 
   const all = contextDocs.map(toCitation);
   return {
@@ -987,6 +1377,10 @@ export async function askDocuments(
       ? all
       : filterCitationsUsedInAnswer(answer, all),
     usage,
+    confidence,
+    relatedDocs: relatedDocs ?? [],
+    suggestPin,
+    retrievalScore,
   };
 }
 
@@ -998,7 +1392,11 @@ export async function askDocumentsStream(
   onToken: (token: string) => void,
   focusDocIds?: number[],
   onDocsResolved?: (citations: ChatCitation[]) => void,
-  userId?: string
+  userId?: string,
+  onReplace?: (content: string) => void,
+  conversationId?: string,
+  isAdmin?: boolean,
+  onMeta?: (meta: AskStreamMeta) => void
 ): Promise<ChatResult> {
   const client = getClient();
   if (!client) {
@@ -1007,31 +1405,87 @@ export async function askDocumentsStream(
     );
   }
 
-  const { docs, emptyReason } = await resolveDocs(
+  const {
+    docs,
+    allRanked,
+    emptyReason,
+    searchPlan,
+    autoFocused,
+    relatedDocs,
+    docScores,
+  } = await resolveDocs(
     question,
     allowedDocIds,
     focusDocIds,
-    userId
+    userId,
+    history,
+    conversationId
   );
 
-  const intent = detectIntent(question, (focusDocIds?.length ?? 0) > 0);
-  const { context, contextDocs, embeddingHits, embeddingTokens } =
-    await buildContext(docs, question, userId, intent);
+  const hasFocus = (focusDocIds?.length ?? 0) > 0;
+  const intent = resolveIntent(
+    question,
+    !!(hasFocus || autoFocused),
+    searchPlan,
+    autoFocused
+  );
+  const {
+    context,
+    contextDocs,
+    embeddingHits,
+    embeddingTokens,
+    mapReduceUsage,
+    retrievalScore,
+    rerankUsage,
+    hydeUsage,
+    visionUsage,
+  } = await buildContext(
+    docs,
+    question,
+    userId,
+    intent,
+    searchPlan?.keywords,
+    allRanked,
+    isAdmin
+  );
   const listMode = intent === "list" || wantsDocList(question);
+  const chatModelUsed = chatModelForIntent(intent);
   const candidateCitations = (
     contextDocs.length > 0 ? contextDocs : docs.slice(0, MAX_CONTEXT_DOCS)
   ).map(toCitation);
-  // Reading status: candidates under consideration
-  onDocsResolved?.(candidateCitations);
+
+  const rankScores = rankingTopScores(docScores, allRanked);
+  const confidence = computeAskConfidence(
+    retrievalScore,
+    rankScores.top,
+    rankScores.second
+  );
+  const suggestPin = shouldSuggestPin(confidence, hasFocus, intent);
+  onMeta?.({
+    confidence,
+    relatedDocs: relatedDocs ?? [],
+    suggestPin,
+    retrievalScore,
+  });
+
+  onDocsResolved?.(relatedDocs?.length ? relatedDocs : candidateCitations);
 
   if (docs.length === 0) {
     const answer = emptyReason ?? "Tidak ada dokumen.";
     onToken(answer);
-    return { answer, citations: [], usage: emptyUsage(model) };
+    return {
+      answer,
+      citations: [],
+      usage: searchPlan?.usage ?? emptyUsage(chatModelUsed),
+      confidence: "low",
+      relatedDocs: [],
+      suggestPin: false,
+      retrievalScore: 0,
+    };
   }
 
   const stream = await client.chat.completions.create({
-    model,
+    model: chatModelUsed,
     messages: buildMessages(
       context,
       history,
@@ -1071,25 +1525,84 @@ export async function askDocumentsStream(
     onToken(answer);
   }
 
-  // Fallback estimate if provider omitted stream usage
+  const streamedAnswer = answer.trim();
+  let verifyUsage: OpenAiUsageSnapshot | undefined;
+  if (shouldVerifyAnswer(intent, question)) {
+    const verified = await verifyAnswerAgainstContext({
+      context,
+      question,
+      answer: streamedAnswer,
+    });
+    answer = verified.answer.trim();
+    verifyUsage = verified.usage;
+    if (answer !== streamedAnswer) {
+      if (answer.startsWith(streamedAnswer)) {
+        const suffix = answer.slice(streamedAnswer.length).trim();
+        if (suffix) {
+          const token = suffix.startsWith("\n") ? suffix : `\n\n${suffix}`;
+          onToken(token);
+        }
+      } else if (onReplace) {
+        onReplace(answer);
+      } else {
+        onToken(`\n\n${answer}`);
+      }
+    }
+  } else {
+    answer = streamedAnswer;
+  }
+
   if (promptTokens === 0 && completionTokens === 0) {
     promptTokens = estimateTokens(context) + estimateTokens(question);
     completionTokens = estimateTokens(answer);
   }
 
-  const usage = mergeUsage(emptyUsage(model), {
-    model,
-    promptTokens,
-    completionTokens,
-    embeddingHits,
-    embeddingTokens,
-    chatHits: 1,
+  const usage = stackAskUsage(chatModelUsed, {
+    searchPlan,
+    mapReduce: mapReduceUsage,
+    verify: verifyUsage,
+    rerank: rerankUsage,
+    hyde: hydeUsage,
+    vision: visionUsage,
+    chat: {
+      promptTokens,
+      completionTokens,
+      embeddingHits,
+      embeddingTokens,
+      chatHits: 1,
+    },
   });
 
   const citations = listMode
     ? candidateCitations
     : filterCitationsUsedInAnswer(answer, candidateCitations);
-  return { answer, citations, usage };
+  return {
+    answer,
+    citations,
+    usage,
+    confidence,
+    relatedDocs: relatedDocs ?? [],
+    suggestPin,
+    retrievalScore,
+  };
+}
+
+export async function evaluateAskRetrieval(
+  question: string,
+  allowedDocIds?: number[],
+  focusDocIds?: number[],
+  userId?: string
+): Promise<{ retrievedIds: number[]; searchPlan?: SearchPlan }> {
+  const { allRanked, searchPlan } = await resolveDocs(
+    question,
+    allowedDocIds,
+    focusDocIds,
+    userId,
+    [],
+    undefined,
+    { skipAutoFocus: true }
+  );
+  return { retrievedIds: allRanked.map((d) => d.id), searchPlan };
 }
 
 export function titleFromQuestion(question: string): string {

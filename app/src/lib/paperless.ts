@@ -52,6 +52,46 @@ function headers(): Record<string, string> {
   return h;
 }
 
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry transient Paperless / network failures (e.g. Postgres pressure). */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string
+): Promise<Response> {
+  const retries = Number(process.env.PAPERLESS_FETCH_RETRIES ?? "2");
+  const max = Number.isFinite(retries) ? Math.min(4, Math.max(0, retries)) : 2;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= max; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (
+        res.ok ||
+        res.status === 400 ||
+        res.status === 404 ||
+        attempt === max
+      ) {
+        return res;
+      }
+      if (res.status >= 500 || res.status === 429) {
+        await sleep(400 * (attempt + 1));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === max) break;
+      await sleep(400 * (attempt + 1));
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(`Paperless ${label} failed after retries`);
+}
+
 export type SearchDocumentsOptions = {
   page?: number;
   pageSize?: number;
@@ -99,10 +139,11 @@ export async function searchDocuments(
     return empty;
   }
 
-  const res = await fetch(`${getPaperlessUrl()}/api/documents/?${params}`, {
-    headers: headers(),
-    next: { revalidate: 0 },
-  });
+  const res = await fetchWithRetry(
+    `${getPaperlessUrl()}/api/documents/?${params}`,
+    { headers: headers(), next: { revalidate: 0 } },
+    "search"
+  );
 
   if (!res.ok) {
     if (res.status === 400) return empty;
@@ -113,10 +154,11 @@ export async function searchDocuments(
 }
 
 export async function getDocument(id: number): Promise<PaperlessDocument> {
-  const res = await fetch(`${getPaperlessUrl()}/api/documents/${id}/`, {
-    headers: headers(),
-    next: { revalidate: 60 },
-  });
+  const res = await fetchWithRetry(
+    `${getPaperlessUrl()}/api/documents/${id}/`,
+    { headers: headers(), next: { revalidate: 60 } },
+    `document ${id}`
+  );
 
   if (!res.ok) throw new Error(`Document ${id} not found`);
   return res.json();

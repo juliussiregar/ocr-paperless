@@ -81,6 +81,30 @@ export async function getPaperlessHealth(): Promise<boolean> {
   }
 }
 
+/** OCR / plain text body and page count for embedding. */
+export async function getPaperlessDocumentForEmbed(
+  id: number
+): Promise<{ content: string; pageCount: number } | null> {
+  if (!PAPERLESS_TOKEN) return null;
+  try {
+    const res = await fetch(`${PAPERLESS_URL}/api/documents/${id}/`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { content?: string; page_count?: number };
+    const content = typeof data.content === "string" ? data.content : null;
+    if (!content) return null;
+    const pageCount =
+      typeof data.page_count === "number" && data.page_count > 0
+        ? data.page_count
+        : 0;
+    return { content, pageCount };
+  } catch {
+    return null;
+  }
+}
+
 /** OCR / plain text body for embedding. */
 export async function getPaperlessDocumentContent(
   id: number

@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { prisma } from "./db.js";
-import { getPaperlessDocumentContent } from "./paperless.js";
+import { getPaperlessDocumentForEmbed } from "./paperless.js";
 import { recordDocumentEmbedUsage } from "./embed-audit.js";
 import { isHeavySyncActive } from "./sync-busy.js";
 
@@ -12,6 +12,18 @@ const EMBED_TX_TIMEOUT_MS = Number(process.env.EMBED_TX_TIMEOUT_MS ?? "60000") |
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function estimatePageForChunk(
+  chunkIndex: number,
+  contentLength: number,
+  pageCount: number
+): number | null {
+  if (!pageCount || pageCount <= 0 || contentLength <= 0) return null;
+  const step = Math.max(1, CHUNK_SIZE - CHUNK_OVERLAP);
+  const charStart = chunkIndex * step;
+  const charsPerPage = contentLength / pageCount;
+  return Math.min(pageCount, Math.max(1, Math.floor(charStart / charsPerPage) + 1));
 }
 
 function pauseEmbedDuringSync(): boolean {
@@ -179,6 +191,7 @@ async function cloneChunksFromPeer(opts: {
             syncFileId: opts.syncFileId,
             paperlessDocumentId: opts.paperlessDocumentId,
             chunkIndex: c.chunkIndex,
+            pageEstimate: c.pageEstimate,
             content: c.content,
             embedding: c.embedding as object,
             tokenEstimate: c.tokenEstimate,
@@ -208,13 +221,17 @@ export async function indexDocumentChunks(opts: {
 
   const cloned = await cloneChunksFromPeer(opts);
   if (cloned > 0) {
+    const { backfillChunkEmbeddingVec } = await import("./doc-summary.js");
+    await backfillChunkEmbeddingVec(opts.userId, opts.paperlessDocumentId);
     return { chunks: cloned, skipped: "cloned" };
   }
 
-  const content = await getPaperlessDocumentContent(opts.paperlessDocumentId);
-  if (!content || content.trim().length < 20) {
+  const meta = await getPaperlessDocumentForEmbed(opts.paperlessDocumentId);
+  if (!meta?.content || meta.content.trim().length < 20) {
     return { chunks: 0, skipped: "empty_content" };
   }
+  const content = meta.content;
+  const pageCount = meta.pageCount;
 
   const contentHash = hashText(content);
   const existing = await prisma.documentChunk.findFirst({
@@ -252,6 +269,7 @@ export async function indexDocumentChunks(opts: {
             syncFileId: opts.syncFileId,
             paperlessDocumentId: opts.paperlessDocumentId,
             chunkIndex: i,
+            pageEstimate: estimatePageForChunk(i, content.length, pageCount),
             content: parts[i]!,
             embedding: embedded.vectors[i]!,
             tokenEstimate: estimateTokens(parts[i]!),
@@ -270,6 +288,22 @@ export async function indexDocumentChunks(opts: {
     chunks: parts.length,
     embeddingTokens: embedded.tokens,
     model: embeddingModel(),
+  });
+
+  const { backfillChunkEmbeddingVec, indexDocSummary } = await import(
+    "./doc-summary.js"
+  );
+  await backfillChunkEmbeddingVec(opts.userId, opts.paperlessDocumentId);
+  const syncFile = await prisma.syncFile.findUnique({
+    where: { id: opts.syncFileId },
+    select: { fileName: true },
+  });
+  await indexDocSummary({
+    userId: opts.userId,
+    syncFileId: opts.syncFileId,
+    paperlessDocumentId: opts.paperlessDocumentId,
+    fileName: syncFile?.fileName ?? String(opts.paperlessDocumentId),
+    content,
   });
 
   return { chunks: parts.length };
@@ -307,7 +341,29 @@ export async function backfillDocumentEmbeddings(): Promise<number> {
       },
       select: { id: true },
     });
-    if (has) continue;
+    if (has) {
+      const { backfillChunkEmbeddingVec, indexDocSummary } = await import(
+        "./doc-summary.js"
+      );
+      await backfillChunkEmbeddingVec(file.userId, docId);
+      const syncRow = await prisma.syncFile.findUnique({
+        where: { id: file.id },
+        select: { fileName: true, docSummary: true },
+      });
+      if (!syncRow?.docSummary) {
+        const meta = await getPaperlessDocumentForEmbed(docId);
+        if (meta?.content) {
+          await indexDocSummary({
+            userId: file.userId,
+            syncFileId: file.id,
+            paperlessDocumentId: docId,
+            fileName: syncRow?.fileName ?? String(docId),
+            content: meta.content,
+          });
+        }
+      }
+      continue;
+    }
 
     try {
       const result = await indexDocumentChunks({

@@ -111,6 +111,8 @@ model SyncFile {
   /// When file entered OCR_PENDING (for UI age / timeout messaging)
   ocrPendingAt        DateTime?  @map("ocr_pending_at")
   lastSyncedAt        DateTime?  @map("last_synced_at")
+  docSummary          String?    @map("doc_summary")
+  docEmbedding        Json?      @map("doc_embedding")
   lastSeenAt          DateTime?  @map("last_seen_at")
   previousRemotePath  String?    @map("previous_remote_path")
   createdAt           DateTime   @default(now()) @map("created_at")
@@ -140,6 +142,7 @@ model DocumentChunk {
   paperlessDocumentId Int      @map("paperless_document_id")
   chunkIndex          Int      @map("chunk_index")
   content             String
+  pageEstimate        Int?     @map("page_estimate")
   /// float[] embedding from OPENAI_EMBEDDING_MODEL
   embedding           Json
   tokenEstimate       Int      @default(0) @map("token_estimate")
