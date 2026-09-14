@@ -20,6 +20,18 @@ build/
 *.swp
 *.swo
 
+# AI / agent tooling (jangan ikut ke remote / client)
+.cursor/
+.claude/
+.codex/
+.gemini/
+.github/copilot-instructions.md
+**/AGENTS.md
+**/CLAUDE.md
+**/GEMINI.md
+.cursorrules
+.cursorignore
+
 # OS
 .DS_Store
 Thumbs.db
@@ -42,5 +54,3 @@ app/prisma/*.db-journal
 tmp/
 temp/
 *.tmp
-
-.cursor

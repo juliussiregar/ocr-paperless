@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import OpenAI from "openai";
+import { ASK_EMBED_NOT_CONFIGURED } from "./product-copy";
 
 const CHUNK_SIZE = envChunkSize();
 const CHUNK_OVERLAP = envChunkOverlap();
@@ -75,7 +76,7 @@ export function isEmbeddingConfigured(): boolean {
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   const client = getClient();
   if (!client) {
-    throw new Error("OpenAI belum dikonfigurasi untuk embedding");
+    throw new Error(ASK_EMBED_NOT_CONFIGURED);
   }
   if (texts.length === 0) return [];
 

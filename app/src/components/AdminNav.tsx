@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Radio, Sparkles, Users } from "lucide-react";
+import { BarChart3, FolderSearch, Radio, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const tabs = [
@@ -20,8 +20,8 @@ const tabs = [
   },
   {
     href: "/admin/ask",
-    label: "Ask AI",
-    icon: Sparkles,
+    label: "Tanya Arsip",
+    icon: FolderSearch,
     exact: false,
   },
   {

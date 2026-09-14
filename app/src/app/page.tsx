@@ -18,7 +18,7 @@ export default async function AskHomePage() {
       <Suspense
         fallback={
           <div className="flex flex-1 items-center justify-center text-sm text-[var(--auth-ink)]/40">
-            Memuat Ask AI…
+            Memuat Tanya Arsip…
           </div>
         }
       >

@@ -86,6 +86,34 @@
       "notes": "UND Rutin 6 Pokja Rehab Rekon Sumatera"
     },
     {
+      "id": "H1-compare-und-mat",
+      "question": "bandingkan undangan dan materi rapat koordinasi satu data tanggap bencana sumatera",
+      "expectedDocIds": [360, 902],
+      "topK": 5,
+      "expectedAnswerPatterns": ["persamaan|perbedaan|undangan|materi"],
+      "evalMode": "both",
+      "notes": "Compare mode: UND vs MAT pola Bappenas"
+    },
+    {
+      "id": "H2-followup-anggaran",
+      "question": "berapa anggarannya?",
+      "expectedDocIds": [341],
+      "focusDocIds": [341],
+      "topK": 1,
+      "expectedAnswerPatterns": ["anggaran|Rp|tidak ditemukan|tidak ada"],
+      "evalMode": "both",
+      "notes": "Follow-up fact on pinned Renduk; boleh jujur jika OCR tidak punya angka"
+    },
+    {
+      "id": "H3-mat-rapat-keputusan",
+      "question": "apa keputusan atau agenda penting di materi rapat bencana sumatera",
+      "expectedDocIds": [607, 366, 2318],
+      "topK": 5,
+      "expectedAnswerPatterns": ["agenda|keputusan|rapat|koordinasi"],
+      "evalMode": "both",
+      "notes": "MAT/Rapat: ekstrak agenda/keputusan"
+    },
+    {
       "id": "G1-negatif-startup",
       "question": "laporan keuangan unicorn startup",
       "expectedDocIds": [],

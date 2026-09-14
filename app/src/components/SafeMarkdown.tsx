@@ -4,15 +4,18 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Minimal safe markdown: headings, bold, italics, lists, paragraphs.
- * No raw HTML, links rendered as text only.
+ * Minimal safe markdown: headings, bold, italics, lists, paragraphs, evidence markers.
+ * No raw HTML. Optional [S1] markers can open the linked source.
  */
 export function SafeMarkdown({
   text,
   className,
+  onEvidenceClick,
 }: {
   text: string;
   className?: string;
+  /** Called with marker id e.g. S1 when user clicks [S1] in the answer */
+  onEvidenceClick?: (evidenceId: string) => void;
 }) {
   const blocks = splitBlocks(text);
 
@@ -29,7 +32,7 @@ export function SafeMarkdown({
             <ul key={i} className="list-disc space-y-2 pl-5">
               {block.items.map((item, j) => (
                 <li key={j} className="whitespace-pre-wrap pl-1">
-                  {renderInline(item.text)}
+                  {renderInline(item.text, onEvidenceClick)}
                 </li>
               ))}
             </ul>
@@ -45,7 +48,7 @@ export function SafeMarkdown({
                   className="pl-1.5 marker:font-semibold marker:text-[var(--auth-ink)]"
                 >
                   <div className="space-y-1.5 whitespace-pre-wrap break-words">
-                    {renderInline(item.text)}
+                    {renderInline(item.text, onEvidenceClick)}
                   </div>
                 </li>
               ))}
@@ -58,7 +61,7 @@ export function SafeMarkdown({
               key={i}
               className="auth-display pt-1 text-base font-bold tracking-tight text-[var(--auth-ink)]"
             >
-              {renderInline(block.text)}
+              {renderInline(block.text, onEvidenceClick)}
             </h2>
           );
         }
@@ -68,14 +71,14 @@ export function SafeMarkdown({
               key={i}
               className="pt-0.5 text-[13px] font-semibold uppercase tracking-[0.08em] text-[var(--auth-teal-deep)]"
             >
-              {renderInline(block.text)}
+              {renderInline(block.text, onEvidenceClick)}
             </h3>
           );
         }
         if (block.type === "p") {
           return (
             <p key={i} className="whitespace-pre-wrap">
-              {renderInline(block.text)}
+              {renderInline(block.text, onEvidenceClick)}
             </p>
           );
         }
@@ -211,10 +214,14 @@ function splitBlocks(raw: string): Block[] {
   return out.length > 0 ? out : [{ type: "p", text: raw }];
 }
 
-function renderInline(text: string): ReactNode {
+function renderInline(
+  text: string,
+  onEvidenceClick?: (evidenceId: string) => void
+): ReactNode {
   const cleaned = text.replace(/<\/?[^>]+>/g, "");
   const parts: ReactNode[] = [];
-  const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
+  // Evidence markers [S1] plus bold/italic/code
+  const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[S\d+\])/gi;
   let last = 0;
   let m: RegExpExecArray | null;
   let key = 0;
@@ -223,7 +230,31 @@ function renderInline(text: string): ReactNode {
       parts.push(cleaned.slice(last, m.index));
     }
     const token = m[0];
-    if (token.startsWith("**")) {
+    if (/^\[S\d+\]$/i.test(token)) {
+      const id = token.slice(1, -1).toUpperCase();
+      if (onEvidenceClick) {
+        parts.push(
+          <button
+            key={key++}
+            type="button"
+            onClick={() => onEvidenceClick(id)}
+            className="mx-0.5 inline-flex translate-y-px items-center rounded-sm bg-[var(--auth-teal)]/12 px-1 py-0.5 text-[11px] font-semibold text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/20"
+            title={`Buka sumber ${id}`}
+          >
+            {id}
+          </button>
+        );
+      } else {
+        parts.push(
+          <span
+            key={key++}
+            className="mx-0.5 inline-flex translate-y-px items-center rounded-sm bg-[var(--auth-teal)]/10 px-1 py-0.5 text-[11px] font-semibold text-[var(--auth-teal-deep)]"
+          >
+            {id}
+          </span>
+        );
+      }
+    } else if (token.startsWith("**")) {
       parts.push(
         <strong key={key++} className="font-semibold text-[var(--auth-ink)]">
           {token.slice(2, -2)}

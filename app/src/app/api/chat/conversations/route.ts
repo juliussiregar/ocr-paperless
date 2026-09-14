@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { serializeScope, type ChatScope } from "@/lib/chat-scope";
+import { ASK_NEW_CONVERSATION_TITLE } from "@/lib/product-copy";
 
 /** List conversations for current user */
 export async function GET() {
@@ -54,7 +55,7 @@ export async function POST(request: NextRequest) {
   const conversation = await prisma.chatConversation.create({
     data: {
       userId: session.user.id,
-      title: "New chat",
+      title: ASK_NEW_CONVERSATION_TITLE,
       scope: serializeScope(scope),
     },
   });

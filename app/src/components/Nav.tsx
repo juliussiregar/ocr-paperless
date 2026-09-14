@@ -13,6 +13,7 @@ import {
   Radio,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ASK_PRODUCT_NAME } from "@/lib/product-copy";
 
 interface NavProps {
   user: { name?: string | null; email?: string | null; role?: string };
@@ -22,8 +23,8 @@ export function Nav({ user }: NavProps) {
   const pathname = usePathname();
 
   const links = [
-    { href: "/", label: "Ask AI", icon: MessageSquareText },
-    { href: "/search", label: "Search", icon: Search },
+    { href: "/", label: ASK_PRODUCT_NAME, icon: MessageSquareText },
+    { href: "/search", label: "Pencarian", icon: Search },
     { href: "/cloud", label: "Library", icon: Library },
     { href: "/profile", label: "Akun", icon: UserCircle },
     ...(user.role === "ADMIN"
@@ -94,10 +95,10 @@ export function Nav({ user }: NavProps) {
             type="button"
             onClick={() => signOut({ callbackUrl: "/login" })}
             className="inline-flex items-center gap-2 border border-[var(--auth-ink)]/15 bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wider text-[var(--auth-ink)] transition hover:border-[var(--auth-ink)] hover:bg-[var(--auth-ink)] hover:text-white"
-            title="Sign out"
+            title="Keluar"
           >
             <LogOut size={14} />
-            <span className="hidden lg:inline">Sign out</span>
+            <span className="hidden lg:inline">Keluar</span>
           </button>
         </div>
       </div>

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pause sync (cancel jobs) lalu start lagi (auto sync ON + delta semua user).
 # Usage:
-#   ./scripts/sync-restart.sh              # di server
-#   ./scripts/sync-restart.sh arteloka    # dari laptop via ssh
+#   ./scripts/sync-restart.sh                 # di server
+#   ./scripts/sync-restart.sh user@SERVER     # dari laptop via ssh
 set -euo pipefail
 
 REMOTE_HOST="${1:-}"

@@ -44,6 +44,11 @@ require_set NEXTAUTH_SECRET
 require_set ENCRYPTION_KEY
 require_set ADMIN_PASSWORD
 
+# Tanya Arsip / embedding butuh kunci API; jangan blokir OCR-only deploy
+if [[ -z "${OPENAI_API_KEY:-}" ]] || [[ "${OPENAI_API_KEY}" == change-me* ]]; then
+  echo "WARN: OPENAI_API_KEY kosong/placeholder. Portal & OCR tetap jalan; Tanya Arsip dan embedding tidak."
+fi
+
 if [[ "${#ENCRYPTION_KEY}" -lt 32 ]]; then
   die "ENCRYPTION_KEY minimal 32 karakter"
 fi
@@ -62,7 +67,7 @@ esac
 PORT="${APP_PORT:-3002}"
 if command -v ss >/dev/null 2>&1; then
   if ss -lnt | awk '{print $4}' | grep -E ":${PORT}\$" >/dev/null 2>&1; then
-    echo "WARN: port ${PORT} sudah listen di host. Ganti APP_PORT di .env (arteloka pakai 3001 → pakai 3002)."
+    echo "WARN: port ${PORT} sudah listen di host. Ganti APP_PORT di .env agar tidak bentrok."
   fi
 fi
 
@@ -127,5 +132,10 @@ else
   info "PAPERLESS_API_TOKEN sudah terisi."
 fi
 
+if [[ -x scripts/verify-up.sh ]] || [[ -f scripts/verify-up.sh ]]; then
+  info "Verifikasi singkat"
+  bash scripts/verify-up.sh || true
+fi
+
 info "Selesai. Log: docker compose logs -f"
-info "Stop DocSearch saja (arteloka tetap jalan): docker compose down"
+info "Stop DocSearch: docker compose down"

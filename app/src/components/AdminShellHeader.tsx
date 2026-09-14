@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/Nav";
 const pages: Record<string, { title: string; description: string }> = {
   "/admin": {
     title: "Ringkasan admin",
-    description: "Audit aktivitas, biaya OpenAI, dan pengaturan auto scan.",
+    description: "Audit aktivitas, biaya pencarian, dan pengaturan auto scan.",
   },
   "/admin/users": {
     title: "User management",

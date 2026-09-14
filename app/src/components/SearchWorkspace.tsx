@@ -881,14 +881,14 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                   </p>
                   <p className="mt-2 max-w-md text-sm text-[var(--auth-ink)]/50">
                     Coba kata lain, matikan &quot;Hanya judul&quot;, ganti
-                    folder, atau tanya langsung di Ask AI.
+                    folder, atau tanya langsung di Tanya Arsip.
                   </p>
                   <Link
                     href="/"
                     className="mt-4 inline-flex items-center gap-2 text-[12px] font-semibold text-[var(--auth-teal)]"
                   >
                     <MessageSquare size={14} />
-                    Buka Ask AI
+                    Buka Tanya Arsip
                   </Link>
                 </div>
               ) : (
@@ -958,7 +958,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                             className="inline-flex items-center gap-1 font-medium text-[var(--auth-ink)]/45 hover:text-[var(--auth-teal)]"
                           >
                             <MessageSquare size={11} />
-                            Tanya Ask AI
+                            Tanya Arsip
                           </Link>
                           <a
                             href={`/api/documents/${doc.id}/download`}
@@ -1039,7 +1039,7 @@ export function SearchWorkspace({ documentCount }: { documentCount: number }) {
                   className="inline-flex items-center gap-1 font-semibold text-[var(--auth-teal)]"
                 >
                   <MessageSquare size={12} />
-                  Tanya Ask AI
+                  Tanya Arsip
                 </Link>
                 <a
                   href={`/api/documents/${selected.id}/preview`}

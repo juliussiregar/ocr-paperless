@@ -1165,7 +1165,7 @@ function CloudBrowserInner() {
             if ((job.newFiles ?? 0) > 0 || (job.ocrPendingCount ?? 0) > 0) {
               setPostIngestAsk({
                 href: `/?folder=${encodeURIComponent(folderPath)}`,
-                label: "Tanyakan dokumen folder ini di Ask AI",
+                label: "Tanyakan dokumen folder ini di Tanya Arsip",
               });
             }
             void refreshFavoriteCounts(true);
@@ -1258,13 +1258,13 @@ function CloudBrowserInner() {
             href: `/?doc=${ids.join(",")}&folder=${encodeURIComponent(normalized)}`,
             label:
               ids.length === 1
-                ? "Tanyakan dokumen ini di Ask AI"
-                : `Tanyakan ${ids.length} dokumen folder ini di Ask AI`,
+                ? "Tanyakan dokumen ini di Tanya Arsip"
+                : `Tanyakan ${ids.length} dokumen folder ini di Tanya Arsip`,
           });
         } else {
           setPostIngestAsk({
             href: `/?folder=${encodeURIComponent(normalized)}`,
-            label: "Tanyakan dokumen folder ini di Ask AI",
+            label: "Tanyakan dokumen folder ini di Tanya Arsip",
           });
         }
         setTimeout(() => setIngestProgress(null), 2500);
@@ -1712,7 +1712,7 @@ function CloudBrowserInner() {
             </p>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-[var(--auth-ink)]/55">
               Buka folder, pilih dokumen, lalu scan agar teks bisa dicari dan
-              ditanya di Ask AI.
+              ditanya di Tanya Arsip.
             </p>
           </div>
         </div>
@@ -2006,7 +2006,7 @@ function CloudBrowserInner() {
                       href={`/?doc=${f.paperlessDocumentId}`}
                       className="text-[var(--auth-teal)] hover:underline"
                     >
-                      Ask AI
+                      Tanya Arsip
                     </Link>
                   )}
                   <button
@@ -2668,7 +2668,7 @@ function CloudBrowserInner() {
                               className="inline-flex items-center gap-1 text-[var(--auth-ink)]/40 hover:text-[var(--auth-teal)]"
                             >
                               <MessageSquare size={11} />
-                              Ask AI
+                              Tanya Arsip
                             </Link>
                           </div>
                         )}

@@ -214,7 +214,7 @@ model ChatConversation {
   id        String   @id @default(cuid())
   userId    String   @map("user_id")
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title     String   @default("New chat")
+  title     String   @default("Percakapan baru")
   /// JSON: { mode: "all" } | { mode: "docs", docIds: number[] } | { mode: "folder", pathPrefix: string }
   scope     String   @default("{\"mode\":\"all\"}")
   createdAt DateTime @default(now()) @map("created_at")

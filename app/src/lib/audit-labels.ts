@@ -15,24 +15,24 @@ const LABELS: Record<
   { title: string; category: AuditCategory; description?: string }
 > = {
   "chat.ask": {
-    title: "Ask AI",
+    title: "Tanya Arsip",
     category: "ai",
-    description: "Mengajukan pertanyaan ke asisten dokumen",
+    description: "Mengajukan pertanyaan ke pencarian arsip",
   },
   "embed.index": {
     title: "Embedding dokumen",
     category: "ai",
-    description: "Index embedding untuk Ask (biaya OpenAI)",
+    description: "Index embedding untuk Tanya Arsip (biaya pencarian)",
   },
   "chat.feedback": {
-    title: "Feedback Ask AI",
+    title: "Feedback Tanya Arsip",
     category: "ai",
-    description: "Menilai jawaban AI",
+    description: "Menilai jawaban pencarian arsip",
   },
   "error.chat": {
-    title: "Error Ask AI",
+    title: "Error Tanya Arsip",
     category: "error",
-    description: "Gagal memproses pertanyaan AI",
+    description: "Gagal memproses pertanyaan arsip",
   },
   "error.search": {
     title: "Error Search",

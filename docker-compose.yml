@@ -1,11 +1,11 @@
-# Nama project: container/volume tidak bentrok dengan arteloka-* di server yang sama
+# Project Compose: container/volume DocSearch terisolasi (name: docsearch)
 name: docsearch
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
-    # VPS 8GB RAM (shared dengan arteloka + whatsapp); override via .env
+    # VPS 8GB RAM default; override via .env
     mem_limit: ${POSTGRES_MEM_LIMIT:-1536m}
     # Paperless workers + Prisma app/worker share this instance (default PG is 100).
     command: postgres -c max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
@@ -16,7 +16,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: paperless
-    # Hanya localhost host (arteloka sudah pakai 5432 publik)
+    # Hanya localhost host (default 5434 agar tidak bentrok Postgres lain di :5432)
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5434}:5432"
     healthcheck:
@@ -174,7 +174,7 @@ services:
       sync-worker:
         condition: service_started
     ports:
-      # arteloka pakai 3001 → default DocSearch di 3002
+      # Default APP_PORT=3002; set di .env jika bentrok
       - "${APP_PORT:-3002}:3000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/app

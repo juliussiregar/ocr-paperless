@@ -20,11 +20,12 @@ import {
   publicAppBaseUrl,
   whatsAppUserEmail,
 } from "@/lib/whatsapp-api";
+import { ASK_GENERIC_ERROR, ASK_NEW_CONVERSATION_TITLE } from "@/lib/product-copy";
 
 export const runtime = "nodejs";
 
 /**
- * WhatsApp integration: Ask AI for fixed portal user (WHATSAPP_USER_EMAIL).
+ * WhatsApp integration: Tanya Arsip for fixed portal user (WHATSAPP_USER_EMAIL).
  * Open endpoint (no API key). Non-stream JSON only.
  */
 export async function POST(request: NextRequest) {
@@ -154,7 +155,9 @@ export async function POST(request: NextRequest) {
     });
 
     const nextTitle =
-      conversation.title === "New chat" || isFirstAssistant
+      conversation.title === "New chat" ||
+      conversation.title === ASK_NEW_CONVERSATION_TITLE ||
+      isFirstAssistant
         ? titleFromQuestion(question)
         : conversation.title;
 
@@ -192,12 +195,12 @@ export async function POST(request: NextRequest) {
       user: { email: user.email, name: user.name },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Chat failed";
+    const detail = err instanceof Error ? err.message : "Chat failed";
     await writeAudit("error.chat.whatsapp", userId, {
       question: question.slice(0, 200),
       conversationId: conversation.id,
-      error: message.slice(0, 500),
+      error: detail.slice(0, 500),
     });
-    return NextResponse.json({ error: message }, { status: 502 });
+    return NextResponse.json({ error: ASK_GENERIC_ERROR }, { status: 502 });
   }
 }

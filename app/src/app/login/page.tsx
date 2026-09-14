@@ -43,13 +43,13 @@ function LoginForm() {
 
   return (
     <AuthShell
-      eyebrow="Sign in"
-      support="Masuk untuk mencari isi PDF dari Cloud Bappenas: OCR, search, dan AI chat."
+      eyebrow="Masuk"
+      support="Masuk untuk mencari dan menanyakan isi PDF dari Cloud Bappenas (OCR, pencarian, arsip)."
     >
       <form onSubmit={handleSubmit} className="space-y-6">
         {registered && (
           <div className="auth-alert auth-alert-ok" role="status">
-            Account created. Silakan sign in.
+            Akun berhasil dibuat. Silakan masuk.
           </div>
         )}
         {error && (
@@ -97,9 +97,11 @@ function LoginForm() {
             className="auth-checkbox"
           />
           <span className="text-sm text-[var(--auth-ink)]/70">
-            Remember me
+            Ingat saya
             <span className="mt-0.5 block text-[11px] text-[var(--auth-ink)]/40">
-              {remember ? "Stay signed in for 30 days" : "Session ends in 8 hours"}
+              {remember
+                ? "Tetap masuk hingga 30 hari"
+                : "Sesi berakhir dalam 8 jam"}
             </span>
           </span>
         </label>
@@ -108,20 +110,20 @@ function LoginForm() {
           {loading ? (
             <>
               <Loader2 className="animate-spin" size={16} />
-              Signing in…
+              Memproses…
             </>
           ) : (
             <>
-              Sign in
+              Masuk
               <ArrowRight size={16} strokeWidth={2.5} />
             </>
           )}
         </button>
 
         <p className="text-center text-sm text-[var(--auth-ink)]/50">
-          Need an account?{" "}
+          Belum punya akun?{" "}
           <Link href="/register" className="auth-link">
-            Create one
+            Daftar
           </Link>
         </p>
       </form>

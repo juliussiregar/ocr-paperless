@@ -230,7 +230,7 @@ export function RecentScansList() {
                         className="inline-flex items-center gap-1 font-semibold text-[var(--auth-teal)]"
                       >
                         <MessageSquare size={11} />
-                        Ask AI
+                        Tanya Arsip
                       </Link>
                       <Link
                         href={`/cloud?path=${encodeURIComponent(parentFolder(f.remotePath))}`}

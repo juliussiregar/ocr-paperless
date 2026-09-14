@@ -8,6 +8,7 @@ import {
   type ChatCitation,
   type ChatHistoryMessage,
 } from "@/lib/openai";
+import { parseAskMode } from "@/lib/ask-mode";
 import { writeAudit } from "@/lib/audit";
 import { rateLimit } from "@/lib/rate-limit";
 import {
@@ -17,6 +18,7 @@ import {
   type ChatScope,
 } from "@/lib/chat-scope";
 import { waitWhileDbHot } from "@/lib/db-load";
+import { ASK_GENERIC_ERROR, ASK_NEW_CONVERSATION_TITLE } from "@/lib/product-copy";
 
 export async function POST(request: NextRequest) {
   const session = await auth();
@@ -42,6 +44,7 @@ export async function POST(request: NextRequest) {
     ? String(body.conversationId)
     : null;
   const stream = body.stream !== false;
+  const askMode = parseAskMode(body.askMode);
   const focusDocIds: number[] = Array.isArray(body.focusDocIds)
     ? body.focusDocIds
         .map((n: unknown) => Number(n))
@@ -131,7 +134,9 @@ export async function POST(request: NextRequest) {
         userId,
         undefined,
         conversation.id,
-        isAdmin
+        isAdmin,
+        undefined,
+        { askMode }
       );
       answer = result.answer;
 
@@ -144,7 +149,11 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      if (isFirstAssistant && conversation.title === "New chat") {
+      if (
+        isFirstAssistant &&
+        (conversation.title === "New chat" ||
+          conversation.title === ASK_NEW_CONVERSATION_TITLE)
+      ) {
         await prisma.chatConversation.update({
           where: { id: conversation.id },
           data: { title: titleFromQuestion(question) },
@@ -173,6 +182,7 @@ export async function POST(request: NextRequest) {
         embeddingHits,
         chatHits,
         estimatedCostUsd: u?.estimatedCostUsd ?? 0,
+        askMode,
       });
 
       return NextResponse.json({
@@ -183,13 +193,13 @@ export async function POST(request: NextRequest) {
         title: titleFromQuestion(question),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Chat failed";
+      const detail = err instanceof Error ? err.message : "Chat failed";
       await writeAudit("error.chat", userId, {
         question: question.slice(0, 200),
         conversationId: conversation.id,
-        error: message.slice(0, 500),
+        error: detail.slice(0, 500),
       });
-      return NextResponse.json({ error: message }, { status: 502 });
+      return NextResponse.json({ error: ASK_GENERIC_ERROR }, { status: 502 });
     }
   }
 
@@ -207,7 +217,8 @@ export async function POST(request: NextRequest) {
           type: "meta",
           conversationId: conversation!.id,
           title:
-            conversation!.title === "New chat"
+            conversation!.title === "New chat" ||
+            conversation!.title === ASK_NEW_CONVERSATION_TITLE
               ? titleFromQuestion(question)
               : conversation!.title,
         });
@@ -236,6 +247,12 @@ export async function POST(request: NextRequest) {
           isAdmin,
           (meta) => {
             send({ type: "ask_meta", ...meta });
+          },
+          {
+            askMode,
+            onStatus: (status) => {
+              send({ type: "status", status });
+            },
           }
         );
         citations = result.citations;
@@ -253,7 +270,9 @@ export async function POST(request: NextRequest) {
         });
 
         const nextTitle =
-          conversation!.title === "New chat" || isFirstAssistant
+          conversation!.title === "New chat" ||
+          conversation!.title === ASK_NEW_CONVERSATION_TITLE ||
+          isFirstAssistant
             ? titleFromQuestion(question)
             : conversation!.title;
 
@@ -282,6 +301,7 @@ export async function POST(request: NextRequest) {
           embeddingHits,
           chatHits,
           estimatedCostUsd: u?.estimatedCostUsd ?? 0,
+          askMode,
         });
 
         send({
@@ -290,13 +310,13 @@ export async function POST(request: NextRequest) {
           title: nextTitle,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Chat failed";
+        const detail = err instanceof Error ? err.message : "Chat failed";
         await writeAudit("error.chat", userId, {
           question: question.slice(0, 200),
           conversationId: conversation!.id,
-          error: message.slice(0, 500),
+          error: detail.slice(0, 500),
         });
-        send({ type: "error", error: message });
+        send({ type: "error", error: ASK_GENERIC_ERROR });
       } finally {
         controller.close();
       }

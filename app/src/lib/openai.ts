@@ -14,6 +14,7 @@ import { planDocumentSearch, type SearchPlan } from "./ask-search-planner";
 import {
   formatRetrievedSnippets,
   bestChunkScoreForDocs,
+  type RetrievedChunk,
 } from "./ask-retrieval";
 import { retrieveWithAgentLoop } from "./ask-agent";
 import {
@@ -29,7 +30,33 @@ import {
   shouldSuggestPin,
   type AskConfidence,
 } from "./ask-confidence";
+import { ASK_NOT_CONFIGURED } from "./product-copy";
 import { maybeVisionContextForZrb } from "./ask-vision";
+import {
+  intentFromAskMode,
+  isThinOcrChars,
+  looksLikeFactQuestion,
+  softenAnalyzeWithoutFocus,
+  wantsFocusExpand,
+  type AskMode,
+  type AskIntent,
+} from "./ask-mode";
+import {
+  buildEvidenceFromChunks,
+  evidenceToCitations,
+  filterCitationsByEvidence,
+  formatEvidenceDelta,
+  formatEvidenceForContext,
+  type AskEvidence,
+} from "./ask-evidence";
+import {
+  ASK_TOOL_DEFINITIONS,
+  askToolsMaxRounds,
+  executeAskTool,
+  isAskToolsEnabled,
+  mergeEvidence,
+  type AskToolContext,
+} from "./ask-tools";
 
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
@@ -61,18 +88,12 @@ function analysisOverlapScanChars(): number {
   return envInt("ASK_RANK_CONTENT_CHARS", 48000, 120000);
 }
 
-type AskIntent = "list" | "detail" | "compare" | "analyze" | "default";
-
 function chatModelForIntent(intent: AskIntent): string {
-  const analyzeModel = process.env.ASK_ANALYZE_MODEL?.trim();
-  const detailModel = process.env.ASK_DETAIL_MODEL?.trim();
-  if (intent === "analyze" && analyzeModel) return analyzeModel;
-  if (
-    (intent === "detail" || intent === "compare" || intent === "analyze") &&
-    detailModel
-  ) {
-    return detailModel;
-  }
+  // Stronger defaults for deep modes; list/default stay on OPENAI_MODEL (often mini).
+  const analyzeModel = process.env.ASK_ANALYZE_MODEL?.trim() || "gpt-4o";
+  const detailModel = process.env.ASK_DETAIL_MODEL?.trim() || "gpt-4o";
+  if (intent === "analyze") return analyzeModel;
+  if (intent === "detail" || intent === "compare") return detailModel;
   return model;
 }
 
@@ -80,14 +101,24 @@ function resolveIntent(
   question: string,
   hasFocus: boolean,
   searchPlan?: SearchPlan,
-  autoFocused?: boolean
+  autoFocused?: boolean,
+  askMode?: AskMode
 ): AskIntent {
-  const pi = searchPlan?.intent;
-  if (pi === "compare") return "compare";
-  if (pi === "list") return "list";
-  if (pi === "fact" || pi === "detail") return "detail";
-  if (pi === "analyze" && (hasFocus || autoFocused)) return "analyze";
-  return detectIntent(question, !!(hasFocus || autoFocused));
+  const focused = !!(hasFocus || autoFocused);
+  const forced = askMode ? intentFromAskMode(askMode) : null;
+  let intent: AskIntent;
+  if (forced) {
+    intent = forced;
+  } else {
+    const pi = searchPlan?.intent;
+    if (pi === "compare") intent = "compare";
+    else if (pi === "list") intent = "list";
+    else if (pi === "fact" || pi === "detail") intent = "detail";
+    else if (pi === "analyze" && focused) intent = "analyze";
+    else intent = detectIntent(question, focused);
+  }
+  // Full-OCR analyze only with pin/auto-focus (chip "Analisis" tanpa pin → detail)
+  return softenAnalyzeWithoutFocus(intent, focused);
 }
 
 function getClient(): OpenAI | null {
@@ -224,31 +255,39 @@ function passesOcrGate(
 }
 
 function autoFocusRatio(): number {
-  const n = Number(process.env.ASK_AUTO_FOCUS_RATIO ?? "1.5");
-  return Number.isFinite(n) ? Math.min(3, Math.max(1.1, n)) : 1.5;
+  // Higher default: only collapse to one doc when the lead is clearly dominant
+  const n = Number(process.env.ASK_AUTO_FOCUS_RATIO ?? "2.2");
+  return Number.isFinite(n) ? Math.min(4, Math.max(1.2, n)) : 2.2;
 }
 
 function applyAutoFocus(
   ranked: PaperlessDocument[],
   scores: Map<number, number>,
   intent: AskIntent,
-  hasFocus: boolean
+  hasFocus: boolean,
+  question?: string
 ): { docs: PaperlessDocument[]; autoFocused: boolean } {
-  if (hasFocus || intent === "list" || intent === "compare") {
+  if (hasFocus || intent === "list" || intent === "compare" || intent === "analyze") {
+    return { docs: ranked, autoFocused: false };
+  }
+  // Fact questions often need several sibling docs (undangan vs MAT); don't collapse early
+  if (question && looksLikeFactQuestion(question)) {
     return { docs: ranked, autoFocused: false };
   }
   const top = ranked[0];
   const second = ranked[1];
   if (!top) return { docs: ranked, autoFocused: false };
+  // Thin OCR winners are unreliable — keep multi-doc context
+  if (isThinOcrChars(ocrContentLen(top))) {
+    return { docs: ranked, autoFocused: false };
+  }
   const s1 = scores.get(top.id) ?? 0;
   const s2 = second ? (scores.get(second.id) ?? 0) : 0;
   const ratio = autoFocusRatio();
-  if (s1 < 35) return { docs: ranked, autoFocused: false };
+  if (s1 < 55) return { docs: ranked, autoFocused: false };
   if (s2 > 0 && s1 < s2 * ratio) return { docs: ranked, autoFocused: false };
-  if (
-    intent === "detail" ||
-    intent === "analyze"
-  ) {
+  // Only auto-focus for clear detail questions with a strong single winner
+  if (intent === "detail") {
     return { docs: [top], autoFocused: true };
   }
   return { docs: ranked, autoFocused: false };
@@ -265,6 +304,7 @@ async function buildContext(
 ): Promise<{
   context: string;
   contextDocs: PaperlessDocument[];
+  evidence: AskEvidence[];
   embeddingHits: number;
   embeddingTokens: number;
   mapReduceUsage?: OpenAiUsageSnapshot;
@@ -277,6 +317,7 @@ async function buildContext(
     return {
       context: "",
       contextDocs: [],
+      evidence: [],
       embeddingHits: 0,
       embeddingTokens: 0,
       retrievalScore: 0,
@@ -289,9 +330,22 @@ async function buildContext(
       userId,
       question
     );
+    const evidence = buildEvidenceFromChunks(
+      contextDocs.map((doc) => ({
+        docId: doc.id,
+        title: displayDocName(doc),
+        fileName: doc.original_file_name,
+        page: null,
+        content: (doc.content ?? "").replace(/\s+/g, " ").trim().slice(0, 800),
+      }))
+    );
+    const evidenceBlock = formatEvidenceForContext(evidence);
     return {
-      context,
+      context: evidenceBlock
+        ? `${context}\n\nBukti terstruktur (rujuk dengan [S1], [S2], …):\n${evidenceBlock}`
+        : context,
       contextDocs,
+      evidence,
       embeddingHits: 0,
       embeddingTokens: 0,
       mapReduceUsage,
@@ -301,14 +355,20 @@ async function buildContext(
 
   const isList = intent === "list" || wantsDocList(question);
   const isDetail = intent === "detail" || intent === "compare";
+  const isFact = looksLikeFactQuestion(question);
   const maxDocs = isDetail ? Math.min(MAX_DOCS_DETAIL, MAX_CONTEXT_DOCS) : MAX_CONTEXT_DOCS;
   const bodyChars = isList
     ? CONTENT_CHARS_LIST
     : isDetail
       ? CONTENT_CHARS_DETAIL
       : CONTENT_CHARS_PER_DOC;
-  const maxChunks = isDetail ? MAX_CHUNKS_DETAIL : MAX_CHUNKS_IN_CONTEXT;
-  const chunksPerDoc = isDetail ? 6 : 3;
+  // Fact questions: pull more/deeper chunks so mid/late-page numbers aren't missed
+  const maxChunks = isFact
+    ? Math.min(28, MAX_CHUNKS_DETAIL + 8)
+    : isDetail
+      ? MAX_CHUNKS_DETAIL
+      : MAX_CHUNKS_IN_CONTEXT;
+  const chunksPerDoc = isFact ? 8 : isDetail ? 6 : 3;
 
   // Single pinned large doc: map-reduce instead of thin chunk window
   if (
@@ -325,9 +385,24 @@ async function buildContext(
       question,
     });
     const body = mapped.body || "(kosong)";
+    const evidence = buildEvidenceFromChunks([
+      {
+        docId: doc.id,
+        title: displayDocName(doc),
+        fileName: doc.original_file_name,
+        page: null,
+        content: body,
+      },
+    ]);
+    const evidenceBlock = formatEvidenceForContext(evidence);
     return {
-      context: `[Dokumen 1] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nRingkasan map-reduce:\n${body}`,
+      context: `[Dokumen 1] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nRingkasan map-reduce:\n${body}${
+        evidenceBlock
+          ? `\n\nBukti terstruktur (rujuk dengan [S1], [S2], …):\n${evidenceBlock}`
+          : ""
+      }`,
       contextDocs: [doc],
+      evidence,
       embeddingHits: 0,
       embeddingTokens: 0,
       mapReduceUsage: mapped.usage,
@@ -338,24 +413,59 @@ async function buildContext(
   // Broad list: rich excerpts scored around query terms (not only doc head)
   if (isList) {
     const take = docs.slice(0, maxDocs);
+    const evidence = buildEvidenceFromChunks(
+      take.map((doc) => ({
+        docId: doc.id,
+        title: displayDocName(doc),
+        fileName: doc.original_file_name,
+        page: null,
+        content: bestContentWindow(doc.content ?? "", question, bodyChars, keywords),
+      }))
+    );
     const context = take
       .map((doc, i) => {
         const body = bestContentWindow(doc.content ?? "", question, bodyChars, keywords);
         return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
       })
       .join("\n\n---\n\n");
-    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0, retrievalScore: 0 };
+    return {
+      context,
+      contextDocs: take,
+      evidence,
+      embeddingHits: 0,
+      embeddingTokens: 0,
+      retrievalScore: 0,
+    };
   }
 
   if (!userId || !isEmbeddingConfigured()) {
     const take = docs.slice(0, maxDocs);
+    const evidence = buildEvidenceFromChunks(
+      take.map((doc) => ({
+        docId: doc.id,
+        title: displayDocName(doc),
+        fileName: doc.original_file_name,
+        page: null,
+        content: bestContentWindow(doc.content ?? "", question, bodyChars, keywords),
+      }))
+    );
+    const evidenceBlock = formatEvidenceForContext(evidence);
     const context = take
       .map((doc, i) => {
         const body = bestContentWindow(doc.content ?? "", question, bodyChars, keywords);
         return `[Dokumen ${i + 1}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\nIsi:\n${body || "(kosong)"}`;
       })
       .join("\n\n---\n\n");
-    return { context, contextDocs: take, embeddingHits: 0, embeddingTokens: 0, retrievalScore: 0 };
+    return {
+      context: evidenceBlock
+        ? `${context}\n\nBukti terstruktur (rujuk dengan [S1], [S2], …):\n${evidenceBlock}`
+        : context,
+      contextDocs: take,
+      evidence,
+      embeddingHits: 0,
+      embeddingTokens: 0,
+      retrievalScore: 0,
+    };
   }
 
   const docMap = new Map(docs.map((d) => [d.id, d]));
@@ -382,8 +492,15 @@ async function buildContext(
     const contextDocs: PaperlessDocument[] = [];
     const parts: string[] = [];
     const seen = new Set<number>();
+    const chunkItems: Array<{
+      docId: number;
+      title: string;
+      fileName: string;
+      page: number | null;
+      content: string;
+    }> = [];
 
-    const pushDoc = (id: number, body: string) => {
+    const pushDoc = (id: number, body: string, chunks?: RetrievedChunk[]) => {
       if (seen.has(id) || contextDocs.length >= maxDocs) return;
       const doc = docMap.get(id);
       if (!doc) return;
@@ -395,13 +512,33 @@ async function buildContext(
       parts.push(
         `[Dokumen ${i}] Nama: ${displayDocName(doc)}\nFile: ${doc.original_file_name}\nID: ${doc.id}\n${summaryLine}${body}`
       );
+      if (chunks) {
+        for (const c of chunks) {
+          chunkItems.push({
+            docId: doc.id,
+            title: displayDocName(doc),
+            fileName: doc.original_file_name,
+            page: c.pageEstimate,
+            content: c.content,
+          });
+        }
+      } else {
+        chunkItems.push({
+          docId: doc.id,
+          title: displayDocName(doc),
+          fileName: doc.original_file_name,
+          page: null,
+          content: body,
+        });
+      }
     };
 
     for (const id of retrieval.docOrder) {
       const chunks = retrieval.byDoc.get(id) ?? [];
       pushDoc(
         id,
-        `Cuplikan relevan:\n${formatRetrievedSnippets(chunks, MAX_CHUNK_CHARS)}`
+        `Cuplikan relevan:\n${formatRetrievedSnippets(chunks, MAX_CHUNK_CHARS)}`,
+        chunks
       );
     }
     for (const id of fallbackOrder) {
@@ -427,7 +564,11 @@ async function buildContext(
       }
     }
 
+    const evidence = buildEvidenceFromChunks(chunkItems);
+    const evidenceBlock = formatEvidenceForContext(evidence);
+
     const baseReturn = {
+      evidence,
       embeddingHits: retrieval.embeddingHits,
       embeddingTokens: retrieval.embeddingTokens,
       retrievalScore: retrieval.bestScore,
@@ -438,6 +579,15 @@ async function buildContext(
 
     if (parts.length === 0) {
       const take = docs.slice(0, maxDocs);
+      const fbEvidence = buildEvidenceFromChunks(
+        take.map((doc) => ({
+          docId: doc.id,
+          title: displayDocName(doc),
+          fileName: doc.original_file_name,
+          page: null,
+          content: bestContentWindow(doc.content ?? "", question, bodyChars, keywords),
+        }))
+      );
       return {
         context: take
           .map((doc, i) => {
@@ -447,16 +597,29 @@ async function buildContext(
           .join("\n\n---\n\n"),
         contextDocs: take,
         ...baseReturn,
+        evidence: fbEvidence,
       };
     }
 
+    const joined = parts.join("\n\n---\n\n");
     return {
-      context: parts.join("\n\n---\n\n"),
+      context: evidenceBlock
+        ? `${joined}\n\nBukti terstruktur (rujuk dengan [S1], [S2], …):\n${evidenceBlock}`
+        : joined,
       contextDocs,
       ...baseReturn,
     };
   } catch {
     const take = docs.slice(0, maxDocs);
+    const evidence = buildEvidenceFromChunks(
+      take.map((doc) => ({
+        docId: doc.id,
+        title: displayDocName(doc),
+        fileName: doc.original_file_name,
+        page: null,
+        content: bestContentWindow(doc.content ?? "", question, bodyChars, keywords),
+      }))
+    );
     return {
       context: take
         .map((doc, i) => {
@@ -465,6 +628,7 @@ async function buildContext(
         })
         .join("\n\n---\n\n"),
       contextDocs: take,
+      evidence,
       embeddingHits: 0,
       embeddingTokens: 0,
       retrievalScore: 0,
@@ -478,6 +642,12 @@ export interface ChatCitation {
   id: number;
   title: string;
   fileName: string;
+  /** Approximate PDF page from chunk index / OCR mapping */
+  page?: number | null;
+  /** Short quote used as evidence */
+  quote?: string;
+  /** Evidence marker e.g. S1 */
+  evidenceId?: string;
 }
 
 export interface ChatResult {
@@ -495,6 +665,8 @@ export type AskStreamMeta = {
   relatedDocs: ChatCitation[];
   suggestPin: boolean;
   retrievalScore: number;
+  intent?: AskIntent;
+  autoFocused?: boolean;
 };
 
 export type ChatHistoryMessage = {
@@ -502,7 +674,12 @@ export type ChatHistoryMessage = {
   content: string;
 };
 
-const SYSTEM_PROMPT = `Kamu asisten Ask AI untuk arsip dokumen organisasi Bappenas.
+export type AskRunOptions = {
+  askMode?: AskMode;
+  onStatus?: (status: string) => void;
+};
+
+const SYSTEM_PROMPT = `Kamu petugas pencarian arsip dokumen organisasi Bappenas.
 Jawab HANYA berdasarkan konteks dokumen yang diberikan.
 Jika informasi tidak ada di konteks, katakan dengan jujur bahwa tidak ditemukan.
 
@@ -515,6 +692,7 @@ Mode jawaban:
 - Detail / fakta angka ("berapa", "jumlah", "total"): jawab langsung dengan angka atau rentang dari konteks; kutip cuplikan pendek sebagai bukti; sebut halaman jika ada di cuplikan.
 - Jangan mengarang. Saat menyebut sumber, pakai field "Nama" (bukan nama file mentah / angka panjang).
 - Untuk angka, nama, tanggal: selalu sertakan kutipan singkat dari cuplikan konteks sebagai bukti.
+- Jika ada blok "Bukti terstruktur" dengan marker [S1], [S2], …: sertakan marker itu di akhir kalimat/klaim penting (contoh: … [S1]). Jangan mengada-ada marker yang tidak ada.
 
 Format daftar (bila >1 dokumen):
 1. **Nama dokumen**
@@ -526,6 +704,7 @@ Format detail (satu atau sedikit dokumen):
 - Mulai dengan jawaban langsung.
 - Lanjut poin berbobot (- atau 1. 2.) berisi fakta dari teks.
 - Akhiri singkat dengan nama sumber yang dipakai.
+- Sisipkan [S1]/[Sn] pada klaim berfakta bila marker tersedia.
 
 Aturan format:
 - Numbered list "1. " "2. " saja untuk daftar.
@@ -566,22 +745,24 @@ function detectIntent(question: string, hasFocus: boolean): AskIntent {
     return "compare";
   }
   if (wantsDocList(question)) return "list";
+  // Explicit analyze verbs only (implicit analytical without pin → detail, not full OCR analyze)
   if (
-    hasFocus &&
-    (looksImplicitAnalytical(question) ||
-      /\b(analisis|evaluasi|dampak|implikasi)\b/i.test(question))
+    /\b(analisis|analisa|evaluasi mendalam|urai dampak|implikasi)\b/i.test(question)
   ) {
+    return hasFocus ? "analyze" : "detail";
+  }
+  if (hasFocus && looksImplicitAnalytical(question)) {
     return "analyze";
   }
-  if (looksImplicitAnalytical(question)) return "analyze";
   if (
     hasFocus ||
-    /\b(detail|jelaskan|uraikan|analisis|poin penting|keputusan|kesimpulan|apa isi|isinya|bagaimana|mengapa|kenapa|ringkas isi|rinci|mendalam)\b/i.test(
+    /\b(detail|jelaskan|uraikan|poin penting|keputusan|kesimpulan|apa isi|isinya|bagaimana|mengapa|kenapa|ringkas isi|rinci|mendalam)\b/i.test(
       question
     )
   ) {
     return "detail";
   }
+  if (looksImplicitAnalytical(question)) return "detail";
   return "default";
 }
 
@@ -760,60 +941,13 @@ function nameOverlapScore(
   return score + (hits / words.length) * 50 + hits;
 }
 
-/** Keep only citations that the answer actually refers to. */
+/** Keep only citations that the answer actually refers to (evidence markers first). */
 export function filterCitationsUsedInAnswer(
   answer: string,
-  citations: ChatCitation[]
+  citations: ChatCitation[],
+  evidence: AskEvidence[] = []
 ): ChatCitation[] {
-  if (citations.length === 0) return [];
-  const text = answer.toLowerCase();
-
-  const used = citations.filter((c) => {
-    const label = humanizeFileName(
-      (c.title && !/^\d{8,}/.test(c.title) ? c.title : c.fileName) || c.title || ""
-    ).toLowerCase();
-    const title = (c.title || "").toLowerCase().trim();
-    const file = (c.fileName || "").toLowerCase().trim();
-    const base = file.replace(/\.pdf$/i, "");
-
-    // Human label tip (most reliable for cleaned names in answers)
-    if (label.length >= 10) {
-      const tip = label.slice(0, Math.min(36, label.length));
-      if (text.includes(tip)) return true;
-    }
-    if (title.length >= 10) {
-      const tip = title.replace(/^\d{8,}[_-]*/, "").slice(0, 36);
-      if (tip.length >= 10 && text.includes(tip.toLowerCase())) return true;
-    }
-    if (file.length >= 12 && text.includes(file)) return true;
-    if (base.length >= 12 && text.includes(base)) return true;
-
-    // Distinctive tokens only (skip short/common words)
-    const tokens = `${label} ${title} ${base}`
-      .split(/[^a-z0-9à-ü]+/i)
-      .map((t) => t.trim().toLowerCase())
-      .filter(
-        (t) =>
-          t.length >= 7 &&
-          !/^(dokumen|undangan|laporan|rencana|sumatera|progres|rapat|finalisasi|rekonstruksi|rehabilitasi)$/i.test(
-            t
-          )
-      );
-    const hits = tokens.filter((t) => text.includes(t)).length;
-    return hits >= 2;
-  });
-
-  if (used.length > 0) return used;
-
-  // Soft: only long unique tip from humanized label
-  return citations.filter((c) => {
-    const label = humanizeFileName(
-      (c.title && !/^\d{8,}/.test(c.title) ? c.title : c.fileName) || ""
-    ).toLowerCase();
-    if (label.length < 14) return false;
-    const tip = label.slice(0, 28);
-    return text.includes(tip);
-  });
+  return filterCitationsByEvidence(answer, evidence, citations) as ChatCitation[];
 }
 
 function toCitation(d: PaperlessDocument): ChatCitation {
@@ -880,7 +1014,7 @@ async function resolveDocs(
   userId?: string,
   history: ChatHistoryMessage[] = [],
   conversationId?: string,
-  opts?: { skipAutoFocus?: boolean }
+  opts?: { skipAutoFocus?: boolean; askMode?: AskMode }
 ): Promise<{
   docs: PaperlessDocument[];
   allRanked: PaperlessDocument[];
@@ -908,7 +1042,7 @@ async function resolveDocs(
     extractRequestedLimit(question) ??
     (wantsRecency(question) ? 5 : MAX_CANDIDATE_DOCS);
 
-  // Pin / compare: only the selected documents
+  // Pin / sticky: primary docs for context, but soft-load related for expansion (not blinders)
   if (focus.length > 0) {
     const focused: PaperlessDocument[] = [];
     for (const id of focus.slice(0, MAX_CONTEXT_DOCS)) {
@@ -918,14 +1052,65 @@ async function resolveDocs(
         // skip
       }
     }
-    if (focused.length > 0) {
-      return { docs: focused, allRanked: focused };
+    if (focused.length === 0) {
+      return {
+        docs: [],
+        allRanked: [],
+        emptyReason:
+          "Dokumen fokus tidak dapat dibuka. Coba unpin lalu pin lagi, atau periksa akses dokumen di Library.",
+      };
     }
+
+    const searchPlan = await planDocumentSearch(question, history);
+    // Soft-load related candidates so tools/agent can expand (pin = primary, not blinders)
+    const related: PaperlessDocument[] = [];
+    const focusSet = new Set(focused.map((d) => d.id));
+    try {
+      const q =
+        searchPlan.keywords.join(" ") ||
+        searchPlan.queries[0] ||
+        question.trim();
+      if (q) {
+        const hit = await cachedSearchDocuments(
+          searchDocuments,
+          q,
+          {
+            page: 1,
+            pageSize: 12,
+            ordering: wantsRecency(question) ? "-created" : undefined,
+          },
+          userId,
+          conversationId
+        );
+        for (const d of hit.results) {
+          if (focusSet.has(d.id)) continue;
+          if (allowed && !allowed.has(d.id)) continue;
+          related.push(d);
+          if (related.length >= 4) break;
+        }
+      }
+    } catch {
+      // related is optional
+    }
+
+    const relatedDocs = related.slice(0, 3).map(toCitation);
+    const expand = wantsFocusExpand(question, opts?.askMode ?? "auto");
+    const thinFocused = focused.some((d) => isThinOcrChars(ocrContentLen(d)));
+    // Thin OCR on pinned/sticky: fold related into primary so we don't answer from empty text
+    const primary =
+      (expand || thinFocused) && related.length > 0
+        ? [...focused, ...related.slice(0, thinFocused ? 3 : 2)].slice(
+            0,
+            MAX_CONTEXT_DOCS
+          )
+        : focused;
+
     return {
-      docs: [],
-      allRanked: [],
-      emptyReason:
-        "Dokumen yang dipin (@) tidak dapat dibuka. Coba unpin lalu pin lagi, atau periksa akses dokumen di Library.",
+      docs: primary,
+      allRanked: [...focused, ...related],
+      searchPlan,
+      relatedDocs,
+      autoFocused: false,
     };
   }
 
@@ -939,7 +1124,13 @@ async function resolveDocs(
     searchQueries[0] ||
     question.trim();
   const ordering = wantsRecency(question) ? "-created" : undefined;
-  const intentPreview = resolveIntent(question, focus.length > 0, searchPlan);
+  const intentPreview = resolveIntent(
+    question,
+    focus.length > 0,
+    searchPlan,
+    false,
+    opts?.askMode
+  );
   const isListIntent =
     intentPreview === "list" || wantsDocList(question) || searchPlan.intent === "list";
   const searchPageSize = isListIntent ? 50 : 30;
@@ -1156,7 +1347,13 @@ async function resolveDocs(
   const sliced = ranked.slice(0, takeN);
   const { docs: finalDocs, autoFocused } = opts?.skipAutoFocus
     ? { docs: sliced, autoFocused: false }
-    : applyAutoFocus(sliced, docScores, intentPreview, focus.length > 0);
+    : applyAutoFocus(
+        sliced,
+        docScores,
+        intentPreview,
+        focus.length > 0,
+        question
+      );
 
   return {
     docs: finalDocs,
@@ -1184,11 +1381,11 @@ function buildMessages(
   if (intent === "list" || wantsDocList(question)) {
     modeHint = `\n\nInstruksi tambahan: mode DAFTAR. Konteks berisi ${contextDocCount} dokumen. Cantumkan SEMUA ${contextDocCount} dokumen (masing-masing ada Ringkas 2–4 kalimat berfakta). Jangan hanya 3.`;
   } else if (intent === "analyze") {
-    modeHint = `\n\nInstruksi tambahan: mode ANALISIS. Konteks berisi teks OCR utuh/berurutan (bukan ringkasan). Jawab pertanyaan tersirat hanya dari bukti di teks; jika inferensi, tandai sebagai interpretasi. Kutip fakta konkret. Jika jawaban tidak ada di teks, katakan jujur.`;
+    modeHint = `\n\nInstruksi tambahan: mode ANALISIS. Konteks berisi teks OCR utuh/berurutan (bukan ringkasan). Jawab pertanyaan tersirat hanya dari bukti di teks; jika inferensi, tandai sebagai interpretasi. Kutip fakta konkret. Rujuk [S1]/[Sn] bila ada. Jika jawaban tidak ada di teks, katakan jujur.`;
   } else if (intent === "detail") {
-    modeHint = `\n\nInstruksi tambahan: mode DETAIL. Gali dokumen paling relevan. Kutip fakta konkret dari cuplikan (tanggal, nomor, pihak, agenda, keputusan) bila ada. Jawab berstruktur poin, bukan daftar panjang.`;
+    modeHint = `\n\nInstruksi tambahan: mode DETAIL. Gali dokumen paling relevan. Kutip fakta konkret dari cuplikan (tanggal, nomor, pihak, agenda, keputusan) bila ada. Jawab berstruktur poin. Rujuk [S1]/[Sn] pada klaim berfakta.`;
   } else if (intent === "compare") {
-    modeHint = `\n\nInstruksi tambahan: mode PERBANDINGAN. Bandingkan hanya dokumen di konteks: persamaan, perbedaan, lalu kesimpulan singkat.`;
+    modeHint = `\n\nInstruksi tambahan: mode PERBANDINGAN. Bandingkan hanya dokumen di konteks: persamaan, perbedaan, lalu kesimpulan singkat. Rujuk [S1]/[Sn] bila ada.`;
   }
 
   return [
@@ -1239,6 +1436,231 @@ function stackAskUsage(
   return u;
 }
 
+function maxTokensForIntent(intent: AskIntent, listMode: boolean): number {
+  if (intent === "analyze") return 3200;
+  if (listMode) return 2400;
+  if (intent === "detail" || intent === "compare") return 2000;
+  return 1600;
+}
+
+function enrichCitationsWithEvidence(
+  citations: ChatCitation[],
+  evidence: AskEvidence[]
+): ChatCitation[] {
+  const byDoc = new Map<number, AskEvidence>();
+  for (const e of evidence) {
+    if (!byDoc.has(e.docId)) byDoc.set(e.docId, e);
+  }
+  return citations.map((c) => {
+    const e = byDoc.get(c.id);
+    if (!e) return c;
+    return {
+      ...c,
+      page: c.page ?? e.page,
+      quote: c.quote ?? e.quote,
+      evidenceId: c.evidenceId ?? e.id,
+    };
+  });
+}
+
+/** Non-streaming tool rounds that may expand context before the final answer. */
+async function runToolEnrichment(opts: {
+  client: OpenAI;
+  model: string;
+  messages: OpenAI.Chat.ChatCompletionMessageParam[];
+  question: string;
+  userId?: string;
+  allowedDocIds?: number[];
+  contextDocs: PaperlessDocument[];
+  evidence: AskEvidence[];
+  /** Original RAG context string (for verify + skip heuristics). */
+  baseContext: string;
+  intent: AskIntent;
+  retrievalScore?: number;
+  hasFocus?: boolean;
+  onStatus?: (status: string) => void;
+}): Promise<{
+  messages: OpenAI.Chat.ChatCompletionMessageParam[];
+  evidence: AskEvidence[];
+  contextDocs: PaperlessDocument[];
+  /** Context for answer verify: base + tool payloads + global evidence markers. */
+  verifyContext: string;
+  toolChatHits: number;
+  toolPromptTokens: number;
+  toolCompletionTokens: number;
+}> {
+  const empty = {
+    messages: opts.messages,
+    evidence: opts.evidence,
+    contextDocs: opts.contextDocs,
+    verifyContext: opts.baseContext,
+    toolChatHits: 0,
+    toolPromptTokens: 0,
+    toolCompletionTokens: 0,
+  };
+
+  // List mode stays broad/fast; tools help detail/compare/analyze/default
+  if (
+    !isAskToolsEnabled() ||
+    !opts.userId ||
+    opts.intent === "list"
+  ) {
+    return empty;
+  }
+
+  // Skip probe when retrieval already strong — EXCEPT fact / expand / thin OCR / deep modes
+  const score = opts.retrievalScore ?? 0;
+  const factQ = looksLikeFactQuestion(opts.question);
+  const expandQ = wantsFocusExpand(opts.question, "auto");
+  const thinOcr = opts.contextDocs.some((d) =>
+    isThinOcrChars(ocrContentLen(d))
+  );
+  const skipProbe =
+    !factQ &&
+    !expandQ &&
+    !thinOcr &&
+    opts.intent !== "compare" &&
+    opts.intent !== "analyze" &&
+    score >= 0.42 &&
+    (opts.intent === "detail" || opts.intent === "default") &&
+    opts.contextDocs.length > 0 &&
+    !/\b(bandingkan|cari ulang|dokumen lain|belum ada|tidak ada di konteks)\b/i.test(
+      opts.question
+    );
+  if (skipProbe) {
+    return empty;
+  }
+
+  if (thinOcr) {
+    opts.onStatus?.(
+      "OCR dokumen tipis atau kurang jelas, mencari cuplikan/dokumen terkait…"
+    );
+  }
+
+  const { getDocument } = await import("./paperless");
+  const docCache = new Map<number, PaperlessDocument>(
+    opts.contextDocs.map((d) => [d.id, d])
+  );
+  const toolCtx: AskToolContext = {
+    userId: opts.userId,
+    allowedDocIds: opts.allowedDocIds,
+    question: opts.question,
+    getDocument,
+    docCache,
+    onStatus: opts.onStatus,
+  };
+
+  let messages = [...opts.messages];
+  let evidence = [...opts.evidence];
+  let contextDocs = [...opts.contextDocs];
+  let toolChatHits = 0;
+  let toolPromptTokens = 0;
+  let toolCompletionTokens = 0;
+  const toolTextParts: string[] = [];
+  const maxRounds = askToolsMaxRounds();
+
+  for (let round = 0; round < maxRounds; round++) {
+    opts.onStatus?.(
+      round === 0
+        ? factQ
+          ? "Mengekstrak fakta dari dokumen…"
+          : "Memperdalam pencarian…"
+        : `Memperdalam pencarian (langkah ${round + 1})…`
+    );
+    const forceExtract =
+      round === 0 &&
+      factQ &&
+      opts.contextDocs.length === 1 &&
+      opts.hasFocus &&
+      !thinOcr;
+    const forceSearchRelated =
+      round === 0 && thinOcr && !forceExtract;
+    const completion = await opts.client.chat.completions.create({
+      model: opts.model,
+      messages,
+      tools: ASK_TOOL_DEFINITIONS,
+      tool_choice: forceExtract
+        ? {
+            type: "function",
+            function: { name: "extract_facts" },
+          }
+        : forceSearchRelated
+          ? {
+              type: "function",
+              function: { name: "search_archive" },
+            }
+          : "auto",
+      temperature: 0.1,
+      max_tokens: 1200,
+    });
+    toolChatHits += 1;
+    toolPromptTokens += completion.usage?.prompt_tokens ?? 0;
+    toolCompletionTokens += completion.usage?.completion_tokens ?? 0;
+
+    const msg = completion.choices[0]?.message;
+    if (!msg) break;
+    const toolCalls = msg.tool_calls;
+    if (!toolCalls || toolCalls.length === 0) break;
+
+    messages.push({
+      role: "assistant",
+      content: msg.content || "",
+      tool_calls: toolCalls,
+    });
+
+    const beforeLen = evidence.length;
+    for (const call of toolCalls) {
+      if (call.type !== "function") continue;
+      const result = await executeAskTool(
+        call.function.name,
+        call.function.arguments,
+        toolCtx
+      );
+      evidence = mergeEvidence(evidence, result.evidence);
+      for (const d of result.docs) {
+        if (!contextDocs.some((x) => x.id === d.id)) contextDocs.push(d);
+      }
+      toolTextParts.push(result.text.slice(0, 12000));
+      messages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: result.text.slice(0, 12000),
+      });
+    }
+
+    // Only publish newly assigned global markers (no conflicting local [S1] from tools)
+    const delta = formatEvidenceDelta(evidence, beforeLen);
+    if (delta) {
+      messages.push({
+        role: "system",
+        content: `Bukti terstruktur baru dari pencarian mendalam (rujuk marker di bawah; jangan pakai marker yang tidak tercantum):\n${delta}`,
+      });
+    }
+  }
+
+  const verifyContext = [
+    opts.baseContext,
+    toolTextParts.length > 0
+      ? `Hasil pencarian mendalam:\n${toolTextParts.join("\n\n---\n\n")}`
+      : "",
+    evidence.length > 0
+      ? `Bukti terstruktur (rujuk [S1], [S2], …):\n${formatEvidenceForContext(evidence)}`
+      : "",
+  ]
+    .filter((p) => p.trim().length > 0)
+    .join("\n\n---\n\n");
+
+  return {
+    messages,
+    evidence,
+    contextDocs,
+    verifyContext,
+    toolChatHits,
+    toolPromptTokens,
+    toolCompletionTokens,
+  };
+}
+
 export async function askDocuments(
   question: string,
   allowedDocIds?: number[],
@@ -1246,15 +1668,15 @@ export async function askDocuments(
   focusDocIds?: number[],
   userId?: string,
   conversationId?: string,
-  isAdmin?: boolean
+  isAdmin?: boolean,
+  runOpts?: AskRunOptions
 ): Promise<ChatResult> {
   const client = getClient();
   if (!client) {
-    throw new Error(
-      "OpenAI belum dikonfigurasi. Isi OPENAI_API_KEY di file .env"
-    );
+    throw new Error(ASK_NOT_CONFIGURED);
   }
 
+  runOpts?.onStatus?.("Mencari dokumen…");
   const {
     docs,
     allRanked,
@@ -1269,7 +1691,8 @@ export async function askDocuments(
     focusDocIds,
     userId,
     history,
-    conversationId
+    conversationId,
+    { askMode: runOpts?.askMode }
   );
   if (docs.length === 0) {
     return {
@@ -1284,11 +1707,18 @@ export async function askDocuments(
     question,
     !!(hasFocus || autoFocused),
     searchPlan,
-    autoFocused
+    autoFocused,
+    runOpts?.askMode
+  );
+  runOpts?.onStatus?.(
+    autoFocused && docs[0]
+      ? `Fokus: ${displayDocName(docs[0])}`
+      : `Membaca ${docs.length} dokumen…`
   );
   const {
     context,
     contextDocs,
+    evidence: initialEvidence,
     embeddingHits,
     embeddingTokens,
     mapReduceUsage,
@@ -1307,26 +1737,36 @@ export async function askDocuments(
   );
   const listMode = intent === "list" || wantsDocList(question);
   const chatModelUsed = chatModelForIntent(intent);
-  const maxTokens =
-    intent === "analyze"
-      ? 3200
-      : listMode
-        ? 2200
-        : intent === "detail"
-          ? 2000
-          : 1600;
+  const baseMessages = buildMessages(
+    context,
+    history,
+    question,
+    contextDocs.length,
+    intent
+  );
 
+  const enriched = await runToolEnrichment({
+    client,
+    model: chatModelUsed,
+    messages: baseMessages,
+    question,
+    userId,
+    allowedDocIds,
+    contextDocs,
+    evidence: initialEvidence,
+    baseContext: context,
+    intent,
+    retrievalScore,
+    hasFocus,
+    onStatus: runOpts?.onStatus,
+  });
+
+  runOpts?.onStatus?.("Menulis jawaban…");
   const completion = await client.chat.completions.create({
     model: chatModelUsed,
-    messages: buildMessages(
-      context,
-      history,
-      question,
-      contextDocs.length,
-      intent
-    ),
+    messages: enriched.messages,
     temperature: 0.2,
-    max_tokens: maxTokens,
+    max_tokens: maxTokensForIntent(intent, listMode),
   });
 
   let answer =
@@ -1336,7 +1776,7 @@ export async function askDocuments(
   let verifyUsage: OpenAiUsageSnapshot | undefined;
   if (shouldVerifyAnswer(intent, question)) {
     const verified = await verifyAnswerAgainstContext({
-      context,
+      context: enriched.verifyContext,
       question,
       answer,
     });
@@ -1344,8 +1784,10 @@ export async function askDocuments(
     verifyUsage = verified.usage;
   }
 
-  const promptTokens = completion.usage?.prompt_tokens ?? 0;
-  const completionTokens = completion.usage?.completion_tokens ?? 0;
+  const promptTokens =
+    (completion.usage?.prompt_tokens ?? 0) + enriched.toolPromptTokens;
+  const completionTokens =
+    (completion.usage?.completion_tokens ?? 0) + enriched.toolCompletionTokens;
   const usage = stackAskUsage(chatModelUsed, {
     searchPlan,
     mapReduce: mapReduceUsage,
@@ -1358,7 +1800,7 @@ export async function askDocuments(
       completionTokens,
       embeddingHits,
       embeddingTokens,
-      chatHits: 1,
+      chatHits: 1 + enriched.toolChatHits,
     },
   });
 
@@ -1370,12 +1812,21 @@ export async function askDocuments(
   );
   const suggestPin = shouldSuggestPin(confidence, hasFocus, intent);
 
-  const all = contextDocs.map(toCitation);
+  const all = enrichCitationsWithEvidence(
+    enriched.contextDocs.map(toCitation),
+    enriched.evidence
+  );
+  const fromEvidence = evidenceToCitations(enriched.evidence) as ChatCitation[];
+  const candidate =
+    fromEvidence.length > 0
+      ? enrichCitationsWithEvidence(fromEvidence, enriched.evidence)
+      : all;
+
   return {
     answer,
     citations: listMode
       ? all
-      : filterCitationsUsedInAnswer(answer, all),
+      : filterCitationsUsedInAnswer(answer, candidate, enriched.evidence),
     usage,
     confidence,
     relatedDocs: relatedDocs ?? [],
@@ -1396,15 +1847,15 @@ export async function askDocumentsStream(
   onReplace?: (content: string) => void,
   conversationId?: string,
   isAdmin?: boolean,
-  onMeta?: (meta: AskStreamMeta) => void
+  onMeta?: (meta: AskStreamMeta) => void,
+  runOpts?: AskRunOptions
 ): Promise<ChatResult> {
   const client = getClient();
   if (!client) {
-    throw new Error(
-      "OpenAI belum dikonfigurasi. Isi OPENAI_API_KEY di file .env"
-    );
+    throw new Error(ASK_NOT_CONFIGURED);
   }
 
+  runOpts?.onStatus?.("Mencari dokumen…");
   const {
     docs,
     allRanked,
@@ -1419,7 +1870,8 @@ export async function askDocumentsStream(
     focusDocIds,
     userId,
     history,
-    conversationId
+    conversationId,
+    { askMode: runOpts?.askMode }
   );
 
   const hasFocus = (focusDocIds?.length ?? 0) > 0;
@@ -1427,11 +1879,44 @@ export async function askDocumentsStream(
     question,
     !!(hasFocus || autoFocused),
     searchPlan,
-    autoFocused
+    autoFocused,
+    runOpts?.askMode
   );
+
+  if (docs.length === 0) {
+    const chatModelUsed = chatModelForIntent(intent);
+    const answer = emptyReason ?? "Tidak ada dokumen.";
+    onMeta?.({
+      confidence: "low",
+      relatedDocs: [],
+      suggestPin: false,
+      retrievalScore: 0,
+      intent,
+      autoFocused: false,
+    });
+    onDocsResolved?.([]);
+    onToken(answer);
+    return {
+      answer,
+      citations: [],
+      usage: searchPlan?.usage ?? emptyUsage(chatModelUsed),
+      confidence: "low",
+      relatedDocs: [],
+      suggestPin: false,
+      retrievalScore: 0,
+    };
+  }
+
+  runOpts?.onStatus?.(
+    autoFocused && docs[0]
+      ? `Fokus: ${displayDocName(docs[0])}`
+      : `Membaca ${docs.length} dokumen…`
+  );
+
   const {
     context,
     contextDocs,
+    evidence: initialEvidence,
     embeddingHits,
     embeddingTokens,
     mapReduceUsage,
@@ -1450,9 +1935,6 @@ export async function askDocumentsStream(
   );
   const listMode = intent === "list" || wantsDocList(question);
   const chatModelUsed = chatModelForIntent(intent);
-  const candidateCitations = (
-    contextDocs.length > 0 ? contextDocs : docs.slice(0, MAX_CONTEXT_DOCS)
-  ).map(toCitation);
 
   const rankScores = rankingTopScores(docScores, allRanked);
   const confidence = computeAskConfidence(
@@ -1466,52 +1948,73 @@ export async function askDocumentsStream(
     relatedDocs: relatedDocs ?? [],
     suggestPin,
     retrievalScore,
+    intent,
+    autoFocused: !!autoFocused,
   });
 
-  onDocsResolved?.(relatedDocs?.length ? relatedDocs : candidateCitations);
+  const earlyCitations = enrichCitationsWithEvidence(
+    (contextDocs.length > 0 ? contextDocs : docs.slice(0, MAX_CONTEXT_DOCS)).map(
+      toCitation
+    ),
+    initialEvidence
+  );
+  // Prefer structured page/quote citations for the rail; relatedDocs stay in ask_meta for pin suggest
+  onDocsResolved?.(earlyCitations.length > 0 ? earlyCitations : relatedDocs ?? []);
 
-  if (docs.length === 0) {
-    const answer = emptyReason ?? "Tidak ada dokumen.";
-    onToken(answer);
-    return {
-      answer,
-      citations: [],
-      usage: searchPlan?.usage ?? emptyUsage(chatModelUsed),
-      confidence: "low",
-      relatedDocs: [],
-      suggestPin: false,
-      retrievalScore: 0,
-    };
-  }
+  const baseMessages = buildMessages(
+    context,
+    history,
+    question,
+    contextDocs.length,
+    intent
+  );
+
+  const enriched = await runToolEnrichment({
+    client,
+    model: chatModelUsed,
+    messages: baseMessages,
+    question,
+    userId,
+    allowedDocIds,
+    contextDocs,
+    evidence: initialEvidence,
+    baseContext: context,
+    intent,
+    retrievalScore,
+    hasFocus,
+    onStatus: runOpts?.onStatus,
+  });
+
+  onDocsResolved?.(
+    enrichCitationsWithEvidence(
+      enriched.contextDocs.map(toCitation),
+      enriched.evidence
+    )
+  );
+
+  runOpts?.onStatus?.(
+    enriched.contextDocs.length === 1
+      ? `Menulis dari: ${displayDocName(enriched.contextDocs[0]!)}`
+      : `Menulis dari ${enriched.contextDocs.length} dokumen…`
+  );
 
   const stream = await client.chat.completions.create({
     model: chatModelUsed,
-    messages: buildMessages(
-      context,
-      history,
-      question,
-      contextDocs.length,
-      intent
-    ),
+    messages: enriched.messages,
     temperature: 0.2,
-    max_tokens: listMode
-      ? 2400
-      : intent === "analyze"
-        ? 3200
-        : intent === "detail"
-          ? 2000
-          : 1600,
+    max_tokens: maxTokensForIntent(intent, listMode),
     stream: true,
     stream_options: { include_usage: true },
   });
 
   let answer = "";
-  let promptTokens = 0;
-  let completionTokens = 0;
+  let promptTokens = enriched.toolPromptTokens;
+  let completionTokens = enriched.toolCompletionTokens;
   for await (const chunk of stream) {
     if (chunk.usage) {
-      promptTokens = chunk.usage.prompt_tokens ?? promptTokens;
-      completionTokens = chunk.usage.completion_tokens ?? completionTokens;
+      promptTokens = (chunk.usage.prompt_tokens ?? 0) + enriched.toolPromptTokens;
+      completionTokens =
+        (chunk.usage.completion_tokens ?? 0) + enriched.toolCompletionTokens;
     }
     const delta = chunk.choices[0]?.delta?.content ?? "";
     if (delta) {
@@ -1529,7 +2032,7 @@ export async function askDocumentsStream(
   let verifyUsage: OpenAiUsageSnapshot | undefined;
   if (shouldVerifyAnswer(intent, question)) {
     const verified = await verifyAnswerAgainstContext({
-      context,
+      context: enriched.verifyContext,
       question,
       answer: streamedAnswer,
     });
@@ -1552,9 +2055,15 @@ export async function askDocumentsStream(
     answer = streamedAnswer;
   }
 
-  if (promptTokens === 0 && completionTokens === 0) {
-    promptTokens = estimateTokens(context) + estimateTokens(question);
-    completionTokens = estimateTokens(answer);
+  if (
+    promptTokens === enriched.toolPromptTokens &&
+    completionTokens === enriched.toolCompletionTokens
+  ) {
+    promptTokens =
+      estimateTokens(context) +
+      estimateTokens(question) +
+      enriched.toolPromptTokens;
+    completionTokens = estimateTokens(answer) + enriched.toolCompletionTokens;
   }
 
   const usage = stackAskUsage(chatModelUsed, {
@@ -1569,13 +2078,23 @@ export async function askDocumentsStream(
       completionTokens,
       embeddingHits,
       embeddingTokens,
-      chatHits: 1,
+      chatHits: 1 + enriched.toolChatHits,
     },
   });
 
+  const all = enrichCitationsWithEvidence(
+    enriched.contextDocs.map(toCitation),
+    enriched.evidence
+  );
+  const fromEvidence = evidenceToCitations(enriched.evidence) as ChatCitation[];
+  const candidate =
+    fromEvidence.length > 0
+      ? enrichCitationsWithEvidence(fromEvidence, enriched.evidence)
+      : all;
+
   const citations = listMode
-    ? candidateCitations
-    : filterCitationsUsedInAnswer(answer, candidateCitations);
+    ? all
+    : filterCitationsUsedInAnswer(answer, candidate, enriched.evidence);
   return {
     answer,
     citations,
@@ -1607,6 +2126,9 @@ export async function evaluateAskRetrieval(
 
 export function titleFromQuestion(question: string): string {
   const clean = question.replace(/\s+/g, " ").trim();
-  if (clean.length <= 48) return clean || "New chat";
+  if (clean.length <= 48) return clean || "Percakapan baru";
   return `${clean.slice(0, 48).trim()}...`;
 }
+
+export type { AskMode, AskIntent, AskEvidence };
+

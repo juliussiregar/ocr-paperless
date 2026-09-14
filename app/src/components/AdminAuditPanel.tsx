@@ -214,7 +214,7 @@ export function AdminAuditPanel() {
               Audit logs
             </h2>
             <p className="mt-1 max-w-xl text-sm text-slate-500">
-              Ringkasan aktivitas user, hit OpenAI, perkiraan biaya, dan error
+              Ringkasan aktivitas user, hit pencarian, perkiraan biaya, dan error
               dalam periode yang dipilih.
             </p>
           </div>
@@ -268,7 +268,7 @@ export function AdminAuditPanel() {
           <div className="rounded-xl bg-slate-900 px-4 py-4 text-white shadow-md">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/50">
-                Total biaya OpenAI
+                Total biaya pencarian
               </p>
               <DollarSign size={16} className="text-teal-300" />
             </div>
@@ -290,7 +290,7 @@ export function AdminAuditPanel() {
           <div className="rounded-xl bg-white px-4 py-4 ring-1 ring-slate-200/80">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                Hit OpenAI (total)
+                Hit pencarian (total)
               </p>
               <Sparkles size={16} className="text-teal-600" />
             </div>
@@ -420,7 +420,7 @@ export function AdminAuditPanel() {
               Belum ada aktivitas di periode ini
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              Coba rentang waktu lebih panjang, atau gunakan Ask AI / Search
+              Coba rentang waktu lebih panjang, atau gunakan Tanya Arsip / Search
               untuk menghasilkan log baru.
             </p>
           </div>

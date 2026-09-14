@@ -19,7 +19,7 @@ export function AuthShell({
   children,
   eyebrow,
   support,
-  footerNote = "Internal use · Cloud Bappenas",
+  footerNote = "Penggunaan internal · Cloud Bappenas",
 }: AuthShellProps) {
   return (
     <div className="auth-surface relative flex min-h-screen flex-col overflow-hidden">

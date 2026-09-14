@@ -563,7 +563,7 @@ export function AdminSyncPanel({ initialSettings }: AdminSyncPanelProps) {
       key: "embed",
       label: "4. Embed",
       count: pipeline?.embedPending ?? 0,
-      hint: "Embedding untuk Ask",
+      hint: "Indeks untuk Tanya Arsip",
     },
   ];
 

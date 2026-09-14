@@ -28,7 +28,22 @@ import {
 import { cn } from "@/lib/utils";
 import type { ChatCitation } from "@/lib/openai";
 import type { ChatScope } from "@/lib/chat-scope";
+import {
+  ASK_MODE_LABELS,
+  stickyFocusStillRelevant,
+  wantsFreshArchiveSearch,
+  type AskMode,
+} from "@/lib/ask-mode";
 import { citationLabel, humanizeFileName } from "@/lib/display-name";
+import {
+  ASK_ASSISTANT_LABEL,
+  ASK_COMPOSER_PLACEHOLDER,
+  ASK_CONFIDENCE_PREFIX,
+  ASK_EMPTY_HINT,
+  ASK_GENERIC_ERROR,
+  ASK_PRODUCT_NAME,
+  ASK_USER_LABEL,
+} from "@/lib/product-copy";
 import { SafeMarkdown } from "@/components/SafeMarkdown";
 import {
   PREVIEW_DEFAULT,
@@ -37,6 +52,7 @@ import {
   readStoredPreviewWidth,
   storePreviewWidth,
 } from "@/components/DocumentPreviewSheet";
+
 type UiMessage = {
   id?: string;
   role: "user" | "assistant";
@@ -47,6 +63,14 @@ type UiMessage = {
   suggestPin?: boolean;
   relatedDocs?: ChatCitation[];
 };
+
+const ASK_MODE_CHIPS: AskMode[] = [
+  "auto",
+  "list",
+  "detail",
+  "analyze",
+  "compare",
+];
 
 function confidenceUiLabel(c: "high" | "medium" | "low"): string {
   if (c === "high") return "Tinggi";
@@ -167,9 +191,18 @@ function FeedbackButtons({
 
 type RailDoc = ChatCitation & { usedInAnswer?: boolean };
 
+function previewHref(docId: number, page?: number | null): string {
+  const hash =
+    page != null && Number.isFinite(page) && page > 0
+      ? `#page=${Math.floor(page)}`
+      : "";
+  return `/api/documents/${docId}/preview${hash}`;
+}
+
 function SourcesPanel({
   docs,
   previewId,
+  previewPage,
   onSelect,
   onClose,
   className,
@@ -177,24 +210,28 @@ function SourcesPanel({
 }: {
   docs: RailDoc[];
   previewId: number | null;
-  onSelect: (id: number) => void;
+  previewPage?: number | null;
+  onSelect: (id: number, page?: number | null) => void;
   onClose: () => void;
   className?: string;
   panelWidth?: number;
 }) {
   const activeIndex = docs.findIndex((d) => d.id === previewId);
+  const activeDoc = activeIndex >= 0 ? docs[activeIndex] : null;
+  const pageForPreview =
+    previewPage ?? activeDoc?.page ?? null;
   const hasNav = docs.length > 1;
 
   function goPrev() {
     if (!hasNav) return;
     const i = activeIndex < 0 ? 0 : (activeIndex - 1 + docs.length) % docs.length;
-    onSelect(docs[i].id);
+    onSelect(docs[i].id, docs[i].page);
   }
 
   function goNext() {
     if (!hasNav) return;
     const i = activeIndex < 0 ? 0 : (activeIndex + 1) % docs.length;
-    onSelect(docs[i].id);
+    onSelect(docs[i].id, docs[i].page);
   }
 
   return (
@@ -224,7 +261,7 @@ function SourcesPanel({
         {docs.map((c, idx) => {
           const selected = previewId === c.id;
           return (
-            <li key={c.id}>
+            <li key={`${c.id}-${c.evidenceId ?? idx}`}>
               <div
                 className={cn(
                   "flex w-full items-start gap-2 rounded-lg px-2 py-2 transition",
@@ -235,7 +272,7 @@ function SourcesPanel({
               >
                 <div className="min-w-0 flex-1">
                   <a
-                    href={`/api/documents/${c.id}/preview`}
+                    href={previewHref(c.id, c.page)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className={cn(
@@ -247,18 +284,31 @@ function SourcesPanel({
                     title="Buka di tab baru"
                   >
                     {idx + 1}. {citationLabel(c)}
+                    {c.page != null && c.page > 0
+                      ? ` · hal. ~${c.page}`
+                      : ""}
                   </a>
+                  {c.quote ? (
+                    <p className="mt-1 line-clamp-2 text-[10px] leading-snug text-[var(--auth-ink)]/45">
+                      “{c.quote}”
+                    </p>
+                  ) : null}
                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
                     {c.usedInAnswer && (
                       <span className="text-[10px] font-semibold text-[var(--auth-teal)]">
                         Dipakai di jawaban
                       </span>
                     )}
+                    {c.evidenceId ? (
+                      <span className="text-[10px] text-[var(--auth-ink)]/35">
+                        [{c.evidenceId}]
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => onSelect(c.id)}
+                  onClick={() => onSelect(c.id, c.page)}
                   className={cn(
                     "inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide",
                     selected
@@ -279,7 +329,7 @@ function SourcesPanel({
         })}
         {docs.length === 0 && (
           <li className="px-2 py-3 text-xs text-[var(--auth-ink)]/35">
-            Sumber muncul setelah Ask AI menjawab.
+            Sumber muncul setelah jawaban.
           </li>
         )}
       </ul>
@@ -309,6 +359,11 @@ function SourcesPanel({
                   </button>
                 </>
               )}
+              {pageForPreview != null && pageForPreview > 0 ? (
+                <span className="text-[10px] tabular-nums text-[var(--auth-ink)]/40">
+                  Hal. ~{Math.floor(pageForPreview)}
+                </span>
+              ) : null}
               <a
                 href={`/api/documents/${previewId}/download`}
                 className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
@@ -323,9 +378,9 @@ function SourcesPanel({
               )}
             </div>
             <iframe
-              key={previewId}
+              key={`${previewId}-${pageForPreview ?? 0}`}
               title="Document preview"
-              src={`/api/documents/${previewId}/preview`}
+              src={previewHref(previewId, pageForPreview)}
               className="min-h-0 w-full flex-1 bg-[var(--auth-paper)]"
             />
           </>
@@ -370,9 +425,14 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
   const [mentionRemote, setMentionRemote] = useState<ContextDoc[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
   const [previewId, setPreviewId] = useState<number | null>(null);
+  const [previewPage, setPreviewPage] = useState<number | null>(null);
   const [previewWidth, setPreviewWidth] = useState(PREVIEW_DEFAULT);
   const [previewResizing, setPreviewResizing] = useState(false);
   const [lastFocusIds, setLastFocusIds] = useState<number[]>([]);
+  const [lastFocusLabels, setLastFocusLabels] = useState<string[]>([]);
+  /** When true (default), follow-ups reuse last sources without requiring @ pin */
+  const [stickyFocusEnabled, setStickyFocusEnabled] = useState(true);
+  const [askMode, setAskMode] = useState<AskMode>("auto");
   const [railDocs, setRailDocs] = useState<RailDoc[]>([]);
   const [readiness, setReadiness] = useState<{
     embedPct: number;
@@ -408,8 +468,19 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     }
   }, [panelDocs, previewId]);
 
-  function openSourcePreview(id: number) {
+  function rememberFocusFromCitations(cites: ChatCitation[]) {
+    setLastFocusIds(cites.map((c) => c.id));
+    setLastFocusLabels(cites.map((c) => citationLabel(c)));
+  }
+
+  function clearStickyFocus() {
+    setLastFocusIds([]);
+    setLastFocusLabels([]);
+  }
+
+  function openSourcePreview(id: number, page?: number | null) {
     setPreviewId(id);
+    setPreviewPage(page != null && page > 0 ? page : null);
     setRailOpen(true);
     setMobileSourcesOpen(true);
   }
@@ -601,7 +672,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
 
     if (!docRaw) {
       setPinned([]);
-      setLastFocusIds([]);
+      clearStickyFocus();
       clearParams();
       textareaRef.current?.focus();
       return;
@@ -650,7 +721,13 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
       }
 
       setPinned(pinnedDocs.slice(0, 5));
-      setLastFocusIds(ids);
+      rememberFocusFromCitations(
+        pinnedDocs.slice(0, 5).map((d) => ({
+          id: d.id,
+          title: docLabel(d),
+          fileName: d.fileName,
+        }))
+      );
       setPreviewId(ids[0] ?? null);
       setRailOpen(true);
       if (!qRaw?.trim() && pinnedDocs[0]) {
@@ -682,12 +759,17 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     const data = await res.json();
     setMessages(data.messages ?? []);
     setPinned([]);
-    setLastFocusIds([]);
     setPreviewId(null);
+    setStickyFocusEnabled(true);
     const msgs = (data.messages ?? []) as UiMessage[];
     const lastWithCitations = [...msgs]
       .reverse()
       .find((m) => m.role === "assistant" && (m.citations?.length ?? 0) > 0);
+    if (lastWithCitations?.citations?.length) {
+      rememberFocusFromCitations(lastWithCitations.citations);
+    } else {
+      clearStickyFocus();
+    }
     setRailDocs(
       (lastWithCitations?.citations ?? []).map((c) => ({
         ...c,
@@ -710,7 +792,8 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     setActiveId(null);
     setMessages([]);
     setPinned([]);
-    setLastFocusIds([]);
+    clearStickyFocus();
+    setStickyFocusEnabled(true);
     setPreviewId(null);
     setRailDocs([]);
     textareaRef.current?.focus();
@@ -832,24 +915,52 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
     }
   }
 
-  async function sendQuestion(q: string, focusOverride?: number[]) {
+  async function sendQuestion(
+    q: string,
+    focusOverride?: number[],
+    opts?: { searchWholeArchive?: boolean }
+  ) {
     const text = q.trim();
     if (!text || loading) return;
 
-    const focusDocIds =
-      focusOverride ??
-      (pinned.length > 0
-        ? pinned.map((p) => p.id)
-        : lastFocusIds.length > 0
-          ? lastFocusIds
-          : undefined);
+    const topicShift =
+      lastFocusIds.length > 0 &&
+      lastFocusLabels.length > 0 &&
+      !stickyFocusStillRelevant(text, lastFocusLabels);
+
+    const searchWhole =
+      opts?.searchWholeArchive === true ||
+      wantsFreshArchiveSearch(text, askMode) ||
+      topicShift;
+
+    let focusDocIds: number[] | undefined;
+    if (focusOverride !== undefined) {
+      focusDocIds = focusOverride.length > 0 ? focusOverride : undefined;
+    } else if (pinned.length > 0) {
+      focusDocIds = pinned.map((p) => p.id);
+    } else if (
+      stickyFocusEnabled &&
+      !searchWhole &&
+      lastFocusIds.length > 0
+    ) {
+      // User forgot @ pin: keep working set from previous answer
+      focusDocIds = lastFocusIds;
+    } else {
+      focusDocIds = undefined;
+    }
 
     setQuestion("");
     setError(null);
     setMentionOpen(false);
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setLoading(true);
-    setStatus("Mencari dokumen…");
+    setStatus(
+      topicShift
+        ? "Topik berbeda, mencari di arsip…"
+        : focusDocIds && focusDocIds.length > 0 && pinned.length === 0
+          ? "Melanjutkan di dokumen sebelumnya…"
+          : "Mencari dokumen…"
+    );
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -864,6 +975,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           conversationId: activeId,
           scope,
           focusDocIds,
+          askMode,
           stream: true,
         }),
       });
@@ -905,19 +1017,30 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             suggestPin?: boolean;
             relatedDocs?: ChatCitation[];
             retrievalScore?: number;
+            status?: string;
+            intent?: string;
+            autoFocused?: boolean;
           };
 
           if (payload.type === "meta" && payload.conversationId) {
             setActiveId(payload.conversationId);
           }
+          if (payload.type === "status" && payload.status) {
+            setStatus(payload.status);
+          }
           if (payload.type === "reading" && payload.citations) {
             citations = payload.citations;
             if (citations.length > 0) {
-              setLastFocusIds(citations.map((c) => c.id));
+              rememberFocusFromCitations(citations);
               setRailDocs(
                 citations.map((c) => ({ ...c, usedInAnswer: false }))
               );
               setPreviewId(citations[0].id);
+              setPreviewPage(
+                citations[0].page != null && citations[0].page > 0
+                  ? citations[0].page
+                  : null
+              );
               setRailOpen(true);
               const names = citations.map((c) => citationLabel(c));
               setStatus(
@@ -943,10 +1066,20 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
               }
               return next;
             });
+            // Do not clobber rail that already has page/quote from reading citations
             if (payload.relatedDocs && payload.relatedDocs.length > 0) {
-              setRailDocs(
-                payload.relatedDocs.map((c) => ({ ...c, usedInAnswer: false }))
-              );
+              setRailDocs((prev) => {
+                if (prev.some((d) => d.page != null || d.quote || d.evidenceId)) {
+                  return prev;
+                }
+                return payload.relatedDocs!.map((c) => ({
+                  ...c,
+                  usedInAnswer: false,
+                }));
+              });
+            }
+            if (payload.autoFocused) {
+              setStatus("Fokus otomatis ke dokumen paling relevan…");
             }
           }
           if (payload.type === "replace" && payload.content) {
@@ -1003,8 +1136,11 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
               return [...usedList, ...rest];
             });
             if (used[0]) {
-              setLastFocusIds(used.map((c) => c.id));
+              rememberFocusFromCitations(used);
               setPreviewId(used[0].id);
+              setPreviewPage(
+                used[0].page != null && used[0].page > 0 ? used[0].page : null
+              );
               setRailOpen(true);
             } else if (citations.length === 0) {
               // keep candidate rail from reading phase
@@ -1048,9 +1184,11 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           return next;
         });
       } else {
-        const msg = err instanceof Error ? err.message : "Terjadi kesalahan";
-        setError(msg);
-        setMessages((prev) => [...prev, { role: "assistant", content: msg }]);
+        setError(ASK_GENERIC_ERROR);
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: ASK_GENERIC_ERROR },
+        ]);
       }
     } finally {
       setLoading(false);
@@ -1228,7 +1366,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           </button>
           <div className="min-w-0 flex-1">
             <p className="auth-display text-[15px] font-bold tracking-tight text-[var(--auth-ink)]">
-              Ask AI
+              {ASK_PRODUCT_NAME}
             </p>
             <p className="truncate text-[11px] text-[var(--auth-ink)]/40">
               {activeTitle}
@@ -1275,9 +1413,9 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             <div
               className="relative z-[1] mx-5 mb-2 rounded-lg border border-amber-200/80 bg-amber-50 px-4 py-3 text-sm text-amber-950 lg:mx-8"
             >
-              <p className="font-medium">Kualitas Ask mungkin terbatas</p>
+              <p className="font-medium">Indeks arsip belum lengkap</p>
               <p className="mt-1 text-xs text-amber-900/80">
-                Embedding {readiness.embedPct}% ({readiness.ocrReady} dokumen OCR
+                Indeks siap {readiness.embedPct}% ({readiness.ocrReady} dokumen OCR
                 siap). Antre OCR: {readiness.ocrPending}, gagal: {readiness.failed}.
                 Pin dokumen dengan @ dan tanya spesifik untuk hasil lebih baik.
               </p>
@@ -1294,10 +1432,11 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           {messages.length === 0 && (
             <div className="mx-auto flex max-w-xl flex-col py-10">
               <p className="auth-display text-[clamp(2.75rem,7vw,4.25rem)] font-bold leading-[0.9] tracking-[-0.045em] text-[var(--auth-ink)]">
-                Ask <span className="text-[var(--auth-teal)]">AI</span>
+                Tanya{" "}
+                <span className="text-[var(--auth-teal)]">Arsip</span>
               </p>
               <p className="mt-5 max-w-md text-[15px] leading-relaxed text-[var(--auth-ink)]/50">
-                Tanya arsip Cloud Bappenas yang sudah di-OCR. Pin dengan{" "}
+                {ASK_EMPTY_HINT} Pin dengan{" "}
                 <span className="font-semibold text-[var(--auth-ink)]">@</span>
                 , bandingkan dua file yang di-pin.
               </p>
@@ -1344,7 +1483,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                       : "text-[var(--auth-ink)]/30"
                   )}
                 >
-                  {msg.role === "user" ? "Anda" : "Ask AI"}
+                  {msg.role === "user" ? ASK_USER_LABEL : ASK_ASSISTANT_LABEL}
                 </p>
                 <div>
                   {msg.role === "user" ? (
@@ -1353,7 +1492,21 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                     </p>
                   ) : (
                     <div className="relative">
-                      <SafeMarkdown text={msg.content || (msg.streaming ? "…" : "")} />
+                      <SafeMarkdown
+                        text={msg.content || (msg.streaming ? "…" : "")}
+                        onEvidenceClick={
+                          msg.citations?.length
+                            ? (evidenceId) => {
+                                const hit = msg.citations?.find(
+                                  (c) =>
+                                    (c.evidenceId ?? "").toUpperCase() ===
+                                    evidenceId.toUpperCase()
+                                );
+                                if (hit) openSourcePreview(hit.id, hit.page);
+                              }
+                            : undefined
+                        }
+                      />
                       {msg.streaming && (
                         <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-[var(--auth-teal)] align-middle" />
                       )}
@@ -1362,7 +1515,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
 
                   {msg.role === "assistant" && msg.confidence && !msg.streaming && (
                     <p className="mt-2 text-[11px] text-[var(--auth-ink)]/50">
-                      Kepercayaan jawaban: {confidenceUiLabel(msg.confidence)}
+                      {ASK_CONFIDENCE_PREFIX} {confidenceUiLabel(msg.confidence)}
                       {msg.suggestPin
                         ? " · Pertimbangkan pin @ dokumen di bawah untuk fokus lebih baik"
                         : null}
@@ -1382,7 +1535,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                           <button
                             key={c.id}
                             type="button"
-                            onClick={() => openSourcePreview(c.id)}
+                            onClick={() => openSourcePreview(c.id, c.page)}
                             className="rounded-md bg-[var(--auth-ink)]/5 px-2 py-1 text-[11px] font-medium text-[var(--auth-teal-deep)] hover:bg-[var(--auth-teal)]/10"
                           >
                             {citationLabel(c)}
@@ -1407,23 +1560,33 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
                     <div className="mt-4 flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:gap-2">
                       {msg.citations.map((c) => (
                         <div
-                          key={c.id}
+                          key={`${c.id}-${c.evidenceId ?? ""}`}
                           className="inline-flex max-w-full items-stretch overflow-hidden rounded-md bg-[var(--auth-teal)]/10 text-[12px] font-medium text-[var(--auth-teal-deep)]"
                         >
                           <a
-                            href={`/api/documents/${c.id}/preview`}
+                            href={previewHref(c.id, c.page)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="min-w-0 flex-1 px-2.5 py-1.5 text-left leading-snug hover:bg-[var(--auth-teal)]/10 hover:underline"
-                            title="Buka di tab baru"
+                            title={
+                              c.quote
+                                ? c.quote
+                                : c.page
+                                  ? `Hal. ~${c.page}`
+                                  : "Buka di tab baru"
+                            }
                           >
                             <span className="break-words">
                               {citationLabel(c)}
+                              {c.page != null && c.page > 0
+                                ? ` · hal. ~${c.page}`
+                                : ""}
+                              {c.evidenceId ? ` [${c.evidenceId}]` : ""}
                             </span>
                           </a>
                           <button
                             type="button"
-                            onClick={() => openSourcePreview(c.id)}
+                            onClick={() => openSourcePreview(c.id, c.page)}
                             className="inline-flex shrink-0 items-center border-l border-[var(--auth-teal)]/15 px-2 hover:bg-[var(--auth-teal)]/15"
                             title="Preview di panel kanan"
                             aria-label={`Preview ${citationLabel(c)}`}
@@ -1559,7 +1722,7 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
               onChange={(e) => onQuestionChange(e.target.value)}
               onKeyDown={onKeyDown}
               rows={2}
-              placeholder="Tanya arsip… ketik @ untuk pin dokumen"
+              placeholder={ASK_COMPOSER_PLACEHOLDER}
               disabled={loading || emptyLibrary}
               className="max-h-[min(40vh,240px)] min-h-[64px] flex-1 resize-none overflow-y-auto bg-transparent py-1.5 text-[15px] leading-relaxed outline-none placeholder:text-[var(--auth-ink)]/30 disabled:opacity-50"
             />
@@ -1584,7 +1747,75 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             )}
           </form>
 
-          {/* Scope chips near composer */}
+          {/* Mode + scope chips near composer */}
+          <div className="mt-3 flex w-full flex-wrap items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-ink)]/30">
+              Mode
+            </span>
+            {ASK_MODE_CHIPS.map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setAskMode(mode)}
+                className={cn(
+                  "text-[12px] transition",
+                  askMode === mode
+                    ? "font-semibold text-[var(--auth-teal)]"
+                    : "text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
+                )}
+              >
+                {ASK_MODE_LABELS[mode]}
+              </button>
+            ))}
+          </div>
+
+          {lastFocusIds.length > 0 && pinned.length === 0 && !loading && (
+            <div className="mt-2 flex w-full flex-wrap items-center gap-2">
+              {stickyFocusEnabled ? (
+                <>
+                  <span className="text-[11px] text-[var(--auth-ink)]/45">
+                    Fokus lanjutan aktif ({lastFocusIds.length} dokumen)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!question.trim()}
+                    onClick={() =>
+                      sendQuestion(question, undefined, {
+                        searchWholeArchive: true,
+                      })
+                    }
+                    className="text-[12px] font-semibold text-[var(--auth-teal)] hover:text-[var(--auth-teal-deep)] disabled:opacity-40"
+                  >
+                    Cari di seluruh arsip
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStickyFocusEnabled(false);
+                      clearStickyFocus();
+                    }}
+                    className="text-[12px] text-[var(--auth-ink)]/40 hover:text-[var(--auth-ink)]"
+                  >
+                    Matikan
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-[11px] text-[var(--auth-ink)]/45">
+                    Fokus lanjutan mati
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setStickyFocusEnabled(true)}
+                    className="text-[12px] font-semibold text-[var(--auth-teal)] hover:text-[var(--auth-teal-deep)]"
+                  >
+                    Aktifkan lagi
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="mt-3 flex w-full flex-wrap items-center gap-2">
             <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--auth-ink)]/30">
               Mencari di
@@ -1653,8 +1884,8 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             </span>
           </div>
           <p className="mt-2 w-full text-center text-[10px] text-[var(--auth-ink)]/30">
-            Enter kirim · Shift+Enter baris baru · @ pin · pin 2 file lalu
-            Bandingkan
+            Enter kirim · Shift+Enter baris baru · @ pin opsional · follow-up
+            otomatis nempel ke sumber sebelumnya
           </p>
         </div>
       </section>
@@ -1676,7 +1907,8 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
           <SourcesPanel
             docs={panelDocs}
             previewId={previewId}
-            onSelect={setPreviewId}
+            previewPage={previewPage}
+            onSelect={(id, page) => openSourcePreview(id, page)}
             onClose={() => setRailOpen(false)}
             panelWidth={previewWidth}
           />
@@ -1696,7 +1928,8 @@ export function AskWorkspace({ documentCount }: { documentCount: number }) {
             <SourcesPanel
               docs={panelDocs}
               previewId={previewId}
-              onSelect={setPreviewId}
+              previewPage={previewPage}
+              onSelect={(id, page) => openSourcePreview(id, page)}
               onClose={() => setMobileSourcesOpen(false)}
             />
           </div>

@@ -42,7 +42,7 @@ export default function RegisterPage() {
 
   return (
     <AuthShell
-      eyebrow="Create account"
+      eyebrow="Daftar"
       support="Satu akun DocSearch + kredensial Cloud Bappenas Anda (disimpan terenkripsi)."
     >
       <form onSubmit={handleSubmit} className="space-y-7">
@@ -53,11 +53,11 @@ export default function RegisterPage() {
         )}
 
         <section className="space-y-5">
-          <h2 className="auth-section-title">App account</h2>
+          <h2 className="auth-section-title">Akun portal</h2>
 
           <div>
             <label htmlFor="reg-name" className="auth-label">
-              Name
+              Nama
             </label>
             <input
               id="reg-name"
@@ -89,7 +89,7 @@ export default function RegisterPage() {
 
           <div>
             <label htmlFor="reg-password" className="auth-label">
-              App password
+              Password portal
             </label>
             <PasswordInput
               id="reg-password"
@@ -98,7 +98,7 @@ export default function RegisterPage() {
               onChange={(e) =>
                 setForm((f) => ({ ...f, password: e.target.value }))
               }
-              placeholder="Min. 8 characters"
+              placeholder="Minimal 8 karakter"
               required
               minLength={8}
               autoComplete="new-password"
@@ -117,7 +117,7 @@ export default function RegisterPage() {
 
           <div>
             <label htmlFor="reg-bappenas-user" className="auth-label">
-              Bappenas username
+              Username Bappenas
             </label>
             <input
               id="reg-bappenas-user"
@@ -133,7 +133,7 @@ export default function RegisterPage() {
 
           <div>
             <label htmlFor="reg-bappenas-pass" className="auth-label">
-              Bappenas password
+              Password Bappenas
             </label>
             <PasswordInput
               id="reg-bappenas-pass"
@@ -152,20 +152,20 @@ export default function RegisterPage() {
           {loading ? (
             <>
               <Loader2 className="animate-spin" size={16} />
-              Creating…
+              Membuat akun…
             </>
           ) : (
             <>
-              Create account
+              Buat akun
               <ArrowRight size={16} strokeWidth={2.5} />
             </>
           )}
         </button>
 
         <p className="text-center text-sm text-[var(--auth-ink)]/50">
-          Already have an account?{" "}
+          Sudah punya akun?{" "}
           <Link href="/login" className="auth-link">
-            Sign in
+            Masuk
           </Link>
         </p>
       </form>

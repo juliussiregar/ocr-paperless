@@ -36,7 +36,7 @@ export function AppShell({ user, children, header, fill = false }: AppShellProps
         <footer className="mt-auto w-full border-t border-[var(--auth-ink)]/10 px-5 py-4 lg:px-8">
           <div className="flex w-full flex-wrap items-center justify-between gap-2 text-[11px] tracking-wide text-[var(--auth-ink)]/40">
             <span>DocSearch Bappenas · Internal use</span>
-            <span>Ask AI · Search · Library</span>
+            <span>Tanya Arsip · Pencarian · Library</span>
           </div>
         </footer>
       )}

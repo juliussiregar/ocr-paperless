@@ -54,6 +54,8 @@ interface DocumentPreviewSheetProps {
   onResizeStart: (e: React.MouseEvent) => void;
   onResetWidth?: () => void;
   resizing?: boolean;
+  /** Jump to PDF page when supported by the browser viewer (#page=N) */
+  page?: number | null;
 }
 
 export function DocumentPreviewSheet({
@@ -63,7 +65,12 @@ export function DocumentPreviewSheet({
   onResizeStart,
   onResetWidth,
   resizing,
+  page,
 }: DocumentPreviewSheetProps) {
+  const pageHash =
+    page != null && Number.isFinite(page) && page > 0
+      ? `#page=${Math.floor(page)}`
+      : "";
   return (
     <div className="fixed inset-0 z-40">
       <button
@@ -89,7 +96,7 @@ export function DocumentPreviewSheet({
               className="inline-flex items-center gap-1 font-semibold text-[var(--auth-teal)]"
             >
               <MessageSquare size={13} />
-              Ask AI
+              Tanya Arsip
             </Link>
             <a
               href={`/api/documents/${docId}/download`}
@@ -97,6 +104,11 @@ export function DocumentPreviewSheet({
             >
               Download
             </a>
+            {page != null && page > 0 ? (
+              <span className="text-[10px] tabular-nums text-[var(--auth-ink)]/40">
+                Hal. ~{Math.floor(page)}
+              </span>
+            ) : null}
             <span className="hidden text-[10px] tabular-nums text-[var(--auth-ink)]/30 sm:inline">
               {Math.round(width)}px
             </span>
@@ -112,7 +124,8 @@ export function DocumentPreviewSheet({
         </div>
         <iframe
           title="Preview dokumen"
-          src={`/api/documents/${docId}/preview`}
+          key={`${docId}-${page ?? 0}`}
+          src={`/api/documents/${docId}/preview${pageHash}`}
           className="min-h-0 w-full flex-1 bg-[var(--auth-paper)]"
         />
       </div>

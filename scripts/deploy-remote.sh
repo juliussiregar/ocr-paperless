@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy DocSearch ke server via git pull (bukan rsync).
 # Usage (dari laptop):
-#   ./scripts/deploy-remote.sh arteloka
+#   ./scripts/deploy-remote.sh user@SERVER_HOST
 # Di server langsung:
 #   cd ~/ocr-paperless && ./scripts/deploy-remote.sh
 set -euo pipefail
@@ -79,7 +79,7 @@ remote_deploy() {
   upsert_env EMBED_BACKFILL_BATCH 35
   upsert_env EMBED_PAUSE_DURING_INGEST true
 
-  echo "==> Ask AI env defaults (D1-D3)"
+  echo "==> Tanya Arsip env defaults (D1-D3)"
   append_env_if_missing ASK_VERIFY_ANSWER true
   append_env_if_missing ASK_VERIFY_CONTEXT_CHARS 40000
   append_env_if_missing ASK_AI_SEARCH_KEYWORDS true

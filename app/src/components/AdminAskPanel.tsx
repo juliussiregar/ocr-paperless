@@ -43,7 +43,7 @@ export function AdminAskPanel() {
       setHealth(h as AskHealth);
       setCases((e as { cases: AskGoldenCase[] }).cases ?? []);
     } catch {
-      showToast("Gagal memuat data Ask AI", "error");
+      showToast("Gagal memuat data Tanya Arsip", "error");
     } finally {
       setLoading(false);
     }
@@ -79,7 +79,7 @@ export function AdminAskPanel() {
     return (
       <div className="flex items-center gap-2 text-sm text-slate-500">
         <Loader2 className="h-4 w-4 animate-spin" />
-        Memuat Ask AI...
+        Memuat Tanya Arsip...
       </div>
     );
   }
@@ -93,11 +93,11 @@ export function AdminAskPanel() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-teal-100 text-teal-700">
             <Sparkles size={18} />
           </div>
           <div>
-            <h2 className="section-title">Ask AI</h2>
+            <h2 className="section-title">Tanya Arsip</h2>
             <p className="text-xs text-slate-500">
               Readiness arsip, eval retrieval golden set, status DB.
             </p>
@@ -153,7 +153,7 @@ export function AdminAskPanel() {
           <div>
             <h3 className="text-sm font-semibold text-slate-900">Golden set eval</h3>
             <p className="text-xs text-slate-500">
-              Uji retrieval (keyword planner + search) tanpa jawaban GPT penuh.
+              Uji retrieval (keyword planner + search) tanpa menjalankan jawaban penuh.
             </p>
           </div>
           <button

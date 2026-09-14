@@ -26,7 +26,7 @@ Opsional penting:
 | Variabel | Default | Fungsi |
 |----------|---------|--------|
 | `SCAN_MAX_FILES` | 100 | Batch ingest |
-| `OPENAI_API_KEY` | - | Ask AI + embedding |
+| `OPENAI_API_KEY` | - | Tanya Arsip + embedding |
 | `INGEST_MAX_RETRY_COUNT` | 5 | Cap auto-retry FAILED |
 | `ASK_FULL_DOC_MAX_CHARS` | 100000 | Analisis teks OCR utuh |
 | `EMBED_BACKFILL_BATCH` | 15 | Kecepatan index embedding |
@@ -70,7 +70,7 @@ docker compose up -d --force-recreate app sync-worker
 2. Library: browse folder, refresh cache
 3. Ambil 1–2 dokumen (non-PDF jika perlu) → OCR done
 4. Search: sync summary + live refresh
-5. Ask AI: pin `@` dokumen, pertanyaan analitis
+5. Tanya Arsip: pin `@` dokumen, pertanyaan analitis
 6. Admin → Scan health: queue depth 0, tidak ada job macet
 7. Admin → Delta manual per user (batch kecil)
 8. **Jangan** nyalakan auto-scan sampai uji manual OK
@@ -93,7 +93,7 @@ Detail: [auto-scan-phases.md](./auto-scan-phases.md)
 | Health degraded | `docker compose logs app`, DB credentials |
 | Redis false | `docker compose logs redis`, memory limit |
 | OCR tidak selesai | Paperless logs, `PAPERLESS_API_TOKEN` |
-| Ask AI kosong | `OPENAI_API_KEY`, embedding backfill di worker log |
+| Tanya Arsip kosong | `OPENAI_API_KEY`, embedding backfill di worker log |
 | User scan lock | Admin → Release lock |
 | FAILED loop | `INGEST_MAX_RETRY_COUNT`, manual retry di Library |
 

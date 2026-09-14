@@ -1,10 +1,10 @@
 # DocSearch Bappenas
 
 Portal OCR & pencarian dokumen Cloud Bappenas (Next.js + Paperless-ngx + sync-worker).  
-**Tanpa Nginx**: browser langsung ke port app (`APP_PORT`, default 3000).
+**Tanpa Nginx**: browser langsung ke port app (`APP_PORT`, default **3002** di server / **3000** saat `npm run dev`).
 
 ```
-Browser ──► :3000 (app)
+Browser ──► :APP_PORT (app)
               ├── postgres / redis / paperless (internal)
 sync-worker ──► WebDAV Bappenas → consume → Paperless OCR
 ```
@@ -15,17 +15,25 @@ Postgres, Redis, Paperless hanya bind `127.0.0.1` di host (tidak dipublish ke in
 
 ## Deploy di server (cara pendek)
 
-Contoh VPS **arteloka** (sudah ada app di `:3001`, Postgres di `:5432`):
+Untuk server client (operator isi `.env` sendiri):
+
+```bash
+cp .env.example .env && nano .env
+./scripts/client-up.sh
+```
+
+Detail: [docs/client-deploy.md](docs/client-deploy.md). Env wajib minimal di `.env.example`; opsi lanjut di `.env.example.full`.
+
+Port host default (sesuaikan di `.env` jika bentrok dengan service lain di server):
 
 | Service | Port host |
 |---------|-----------|
-| Arteloka app | `3001` (biarkan) |
-| DocSearch portal | **`3002`** |
-| DocSearch Postgres | `127.0.0.1:5434` (bukan 5432) |
+| DocSearch portal | **`APP_PORT`** (default `3002`) |
+| DocSearch Postgres | `127.0.0.1:5434` |
 | DocSearch Redis | `127.0.0.1:6380` |
 | Paperless admin | `127.0.0.1:8000` |
 
-Project Compose bernama `docsearch` (container/volume terpisah dari `arteloka-*`).  
+Project Compose bernama `docsearch` (container/volume sendiri).  
 RAM **8GB+** disarankan (Paperless ~2GB, sync-worker ~1GB, app ~768MB, Redis 256MB).
 
 Checklist deploy lengkap: [docs/deploy.md](docs/deploy.md)
@@ -49,11 +57,11 @@ nano .env
 
 Isi wajib (jangan biarkan `change-me…` / `SERVER_IP`):
 
-| Variabel | Contoh arteloka |
-|----------|-----------------|
+| Variabel | Contoh |
+|----------|--------|
 | `COMPOSE_PROFILES` | `prod` |
 | `APP_PORT` | `3002` |
-| `NEXTAUTH_URL` | `http://IP_SERVER:3002` |
+| `NEXTAUTH_URL` | `http://IP_ATAU_DOMAIN:3002` |
 | `NEXTAUTH_SECRET` / `ENCRYPTION_KEY` | random kuat |
 | Password DB / Paperless / Admin | kuat |
 
@@ -67,7 +75,7 @@ chmod +x scripts/server-up.sh
 ### 4. Token Paperless (sekali)
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 arteloka@SERVER
+ssh -L 8000:127.0.0.1:8000 user@SERVER
 # browser: http://127.0.0.1:8000 → API token → .env PAPERLESS_API_TOKEN=
 docker compose up -d --force-recreate app sync-worker
 ```
@@ -77,7 +85,7 @@ docker compose up -d --force-recreate app sync-worker
 ```bash
 docker compose ps
 curl http://127.0.0.1:3002/api/health
-# arteloka tetap: docker ps | grep arteloka
+./scripts/verify-up.sh
 ```
 
 ### Update
@@ -87,7 +95,7 @@ git pull
 ./scripts/server-up.sh
 ```
 
-### Stop DocSearch saja (arteloka tetap)
+### Stop DocSearch
 
 ```bash
 docker compose down
