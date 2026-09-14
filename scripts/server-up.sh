@@ -83,6 +83,9 @@ if [[ "$(free -b | awk '/Mem:/{print $2}')" -lt 6000000000 ]]; then
 fi
 
 info "Build & start (docker compose up -d --build) project=docsearch"
+# VPS 8GB: build app + sync-worker paralel mudah OOM (exit 137)
+export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"
+export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 docker compose up -d --build
 
 info "Menunggu app sehat di :$PORT ..."
@@ -134,7 +137,20 @@ fi
 
 if [[ -x scripts/verify-up.sh ]] || [[ -f scripts/verify-up.sh ]]; then
   info "Verifikasi singkat"
-  bash scripts/verify-up.sh || true
+  set +e
+  bash scripts/verify-up.sh
+  vrc=$?
+  set -e
+  if [[ "$vrc" -eq 2 ]]; then
+    echo
+    echo "DEPLOY BELUM LENGKAP: portal mungkin hidup, tapi Tanya Arsip/OCR sync belum siap."
+    echo "Isi OPENAI_API_KEY dan/atau PAPERLESS_API_TOKEN, lalu:"
+    echo "  docker compose up -d --force-recreate app sync-worker"
+    echo "  ./scripts/verify-up.sh"
+  elif [[ "$vrc" -ne 0 ]]; then
+    echo
+    echo "DEPLOY BERMASALAH: health gagal. Cek: docker compose logs -f app"
+  fi
 fi
 
 info "Selesai. Log: docker compose logs -f"

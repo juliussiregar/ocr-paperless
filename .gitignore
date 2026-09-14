@@ -54,3 +54,7 @@ app/prisma/*.db-journal
 tmp/
 temp/
 *.tmp
+
+# PDF hasil generate (kirim manual ke client, jangan ikut push)
+docs/*.pdf
+docs/presentation/*.pdf
